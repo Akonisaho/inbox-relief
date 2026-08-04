@@ -45,4 +45,5 @@ class Email(Base):
     is_unread: Mapped[bool] = mapped_column(default=False)
 
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

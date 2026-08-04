@@ -1,13 +1,17 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from starlette.concurrency import run_in_threadpool
 
 from app.config import GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH
 from app.db import SessionLocal, init_models
+from app.embeddings import email_to_embedding_text, embed_text
 from app.models import Email, Tenant
 from app.providers.gmail import GmailProvider
+from app.vectorstore import search_similar, upsert_email_vector
 
 DEFAULT_TENANT_NAME = "default"
 
@@ -32,10 +36,12 @@ def health():
 
 
 @app.get("/ingest/gmail/sync")
-async def sync_gmail():
+async def sync_gmail(limit: int | None = 200):
+    """limit=None fetches the entire mailbox — slow on a near-full inbox, so
+    default to a bounded batch until we're ready for a full historical sync."""
     provider = GmailProvider(str(GMAIL_CREDENTIALS_PATH), str(GMAIL_TOKEN_PATH))
     provider.authenticate()
-    emails = provider.fetch_new_emails()
+    emails = await run_in_threadpool(provider.fetch_new_emails, None, limit)
 
     async with SessionLocal() as session:
         tenant = await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
@@ -84,3 +90,47 @@ async def list_emails():
             }
             for row in rows
         ]
+
+
+@app.get("/index/gmail")
+async def index_unembedded_emails():
+    """Embed every stored email that hasn't been embedded yet and upsert into Qdrant."""
+    async with SessionLocal() as session:
+        tenant = await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
+        rows = (
+            await session.scalars(select(Email).where(Email.embedded_at.is_(None)))
+        ).all()
+
+        indexed = 0
+        for row in rows:
+            text = email_to_embedding_text(row.subject, row.sender, row.body_text or row.snippet)
+            vector = await run_in_threadpool(embed_text, text)
+            await run_in_threadpool(
+                upsert_email_vector,
+                tenant.id,
+                row.id,
+                vector,
+                {
+                    "subject": row.subject,
+                    "sender": row.sender,
+                    "received_at": row.received_at.isoformat(),
+                    "snippet": row.snippet,
+                },
+            )
+            row.embedded_at = datetime.now(timezone.utc)
+            indexed += 1
+
+        await session.commit()
+
+    return {"indexed": indexed, "skipped_already_embedded": len(rows) - indexed}
+
+
+@app.get("/search")
+async def search_emails(q: str, limit: int = 5):
+    """Find past emails semantically similar to a free-text query — proves the RAG retrieval step."""
+    async with SessionLocal() as session:
+        tenant = await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
+
+    vector = await run_in_threadpool(embed_text, q)
+    results = await run_in_threadpool(search_similar, tenant.id, vector, limit)
+    return {"query": q, "results": results}

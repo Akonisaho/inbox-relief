@@ -44,18 +44,30 @@ class GmailProvider(MailProvider):
 
         self._service = build("gmail", "v1", credentials=creds)
 
-    def fetch_new_emails(self, since: datetime | None = None) -> list[NormalizedEmail]:
+    def fetch_new_emails(
+        self, since: datetime | None = None, max_results: int | None = None
+    ) -> list[NormalizedEmail]:
+        """Paginates through Gmail's message list. max_results=None fetches
+        every message matching the query (can be slow/large on a full mailbox)."""
         if self._service is None:
             raise RuntimeError("call authenticate() before fetch_new_emails()")
 
         query = f"after:{int(since.timestamp())}" if since else ""
-        results = (
-            self._service.users()
-            .messages()
-            .list(userId="me", q=query, maxResults=25)
-            .execute()
-        )
-        message_refs = results.get("messages", [])
+        message_refs = []
+        page_token = None
+        while True:
+            page_size = 500 if max_results is None else min(500, max_results - len(message_refs))
+            request = (
+                self._service.users()
+                .messages()
+                .list(userId="me", q=query, maxResults=page_size, pageToken=page_token)
+            )
+            results = request.execute()
+            message_refs.extend(results.get("messages", []))
+
+            page_token = results.get("nextPageToken")
+            if not page_token or (max_results is not None and len(message_refs) >= max_results):
+                break
 
         emails: list[NormalizedEmail] = []
         for ref in message_refs:

@@ -10,9 +10,10 @@ roadmap, security/POPIA notes) — not included in this repo.
 
 ## Status
 
-Gmail ingestion proven end-to-end (auth + fetch + persist to Postgres, with
-dedup on repeated syncs). No second provider (Outlook skipped for now — see
-project notes), no RAG, no frontend yet — see `backend/app/main.py`.
+Gmail ingestion, Postgres persistence, and RAG retrieval all proven
+end-to-end: ~2,000 real emails synced, embedded, and semantically searchable.
+No second provider (Outlook skipped for now — see project notes), no
+classification/archival logic yet, no frontend — see `backend/app/main.py`.
 
 Outlook is intentionally not implemented yet: the `MailProvider` interface
 supports adding it later as a bounded, additive piece of work whenever a
@@ -51,14 +52,34 @@ Tables are created automatically on API startup (`app/db.py: init_models`) —
 no manual migration step yet (fine for MVP; revisit with Alembic if the schema
 needs to evolve without dropping data).
 
+### Qdrant + Ollama (dev)
+
+Qdrant runs on non-default ports to avoid clashing with other local containers:
+
+```
+docker run --name inbox-relief-qdrant -p 6335:6333 -p 6336:6334 -d qdrant/qdrant
+```
+
+Ollama runs natively (not in Docker) and serves the local models used for
+embeddings and (later) classification:
+
+```
+ollama pull nomic-embed-text
+ollama pull llama3.1:8b
+```
+
 ### Running the API
 
 ```
 uvicorn app.main:app --reload
 ```
 
-- `GET /ingest/gmail/sync` — fetch recent Gmail messages and upsert into Postgres
+- `GET /ingest/gmail/sync?limit=200` — fetch Gmail messages (paginated) and upsert into Postgres.
+  `limit` caps how many are fetched; omit/set high for a full historical sync (slow — expect
+  roughly 300ms/email just for ingestion on a large mailbox, so size the limit accordingly)
 - `GET /emails` — list stored emails
+- `GET /index/gmail` — embed any stored emails not yet embedded and upsert into Qdrant
+- `GET /search?q=...` — semantic search over embedded emails (proves RAG retrieval)
 
 If you're behind a corporate proxy/antivirus that does TLS inspection, you may
 hit `SSLCertVerificationError: self-signed certificate in certificate chain`.
@@ -72,10 +93,14 @@ instead of the bundled CA list.
 backend/
   app/
     providers/
-      base.py      # MailProvider interface + NormalizedEmail shape
-      gmail.py      # Gmail adapter (OAuth, fetch, archive/restore)
+      base.py        # MailProvider interface + NormalizedEmail shape
+      gmail.py        # Gmail adapter (OAuth, fetch, archive/restore)
     config.py
-    main.py         # FastAPI app
+    db.py             # SQLAlchemy async engine/session
+    models.py         # Tenant, User, Email ORM models
+    embeddings.py      # Ollama embedding calls
+    vectorstore.py      # Qdrant collection per tenant
+    main.py            # FastAPI app
   scripts/
     authorize_gmail.py
   secrets/          # git-ignored — credentials.json, token.json live here

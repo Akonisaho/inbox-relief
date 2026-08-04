@@ -9,3 +9,5 @@ google-api-python-client
 sqlalchemy>=2.0
 asyncpg
 truststore
+qdrant-client
+ollama
