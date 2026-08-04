@@ -1,20 +1,36 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
-from sqlalchemy import select
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from starlette.concurrency import run_in_threadpool
 
+from app.chat import answer_question, classify_intent, extract_rule
 from app.config import GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH
 from app.db import SessionLocal, init_models
 from app.embeddings import email_to_embedding_text, embed_text
 from app.inference import ClassificationError, classify_email
-from app.models import Email, Tenant
+from app.models import AuditLog, Correction, Email, Rule, Tenant
 from app.providers.gmail import GmailProvider
 from app.vectorstore import search_similar, upsert_email_vector
 
 DEFAULT_TENANT_NAME = "default"
+
+
+def _gmail_provider() -> GmailProvider:
+    provider = GmailProvider(str(GMAIL_CREDENTIALS_PATH), str(GMAIL_TOKEN_PATH))
+    provider.authenticate()
+    return provider
+
+
+async def _get_default_tenant(session):
+    return await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
+
+
+def _log_audit(session, tenant_id: int, action: str, email_id: int | None = None, detail: dict | None = None):
+    session.add(AuditLog(tenant_id=tenant_id, action=action, email_id=email_id, detail=detail or {}))
 
 
 @asynccontextmanager
@@ -137,20 +153,39 @@ async def search_emails(q: str, limit: int = 5):
     return {"query": q, "results": results}
 
 
+def _matches_rule(rule: Rule, subject: str, sender: str) -> bool:
+    haystack = (subject if rule.match_field == "subject" else sender).lower()
+    return rule.match_value.lower() in haystack
+
+
 @app.get("/classify/gmail")
 async def classify_unclassified_emails(limit: int = 20):
     """Judge urgency + archive-worthiness for unclassified emails via local LLM + RAG.
-    Bounded by default — CPU inference is much slower than embedding."""
+    Bounded by default — CPU inference is much slower than embedding. Rules are
+    checked first and skip the LLM entirely when matched."""
     async with SessionLocal() as session:
-        tenant = await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
+        tenant = await _get_default_tenant(session)
         rows = (
             await session.scalars(
                 select(Email).where(Email.classified_at.is_(None)).limit(limit)
             )
         ).all()
+        rules = (await session.scalars(select(Rule).where(Rule.tenant_id == tenant.id))).all()
 
-        classified, failed = 0, []
+        classified, rule_matched, failed = 0, 0, []
         for row in rows:
+            matched_rule = next(
+                (r for r in rules if _matches_rule(r, row.subject, row.sender)), None
+            )
+            if matched_rule:
+                row.urgency = matched_rule.urgency
+                row.should_archive = matched_rule.should_archive
+                row.confidence = 1.0
+                row.reasoning = f"Matched rule: {matched_rule.match_field}={matched_rule.match_value!r}"
+                row.classified_at = datetime.now(timezone.utc)
+                rule_matched += 1
+                continue
+
             try:
                 result = await run_in_threadpool(
                     classify_email, tenant.id, row.subject, row.sender, row.body_text, row.snippet
@@ -168,7 +203,7 @@ async def classify_unclassified_emails(limit: int = 20):
 
         await session.commit()
 
-    return {"classified": classified, "failed": failed}
+    return {"classified": classified, "rule_matched": rule_matched, "failed": failed}
 
 
 @app.get("/emails/classified")
@@ -192,4 +227,267 @@ async def list_classified_emails():
                 "reasoning": row.reasoning,
             }
             for row in rows
+        ]
+
+
+@app.post("/emails/{email_id}/archive")
+async def archive_one(email_id: int):
+    async with SessionLocal() as session:
+        row = await session.get(Email, email_id)
+        if not row:
+            raise HTTPException(404, "email not found")
+        if row.archived_at:
+            return {"already_archived": True}
+
+        provider = await run_in_threadpool(_gmail_provider)
+        await run_in_threadpool(provider.archive, row.provider_message_id)
+
+        row.archived_at = datetime.now(timezone.utc)
+        _log_audit(session, row.tenant_id, "archive", row.id, {"subject": row.subject})
+        await session.commit()
+
+    return {"archived": True, "email_id": email_id}
+
+
+@app.post("/emails/{email_id}/restore")
+async def restore_one(email_id: int):
+    async with SessionLocal() as session:
+        row = await session.get(Email, email_id)
+        if not row:
+            raise HTTPException(404, "email not found")
+        if not row.archived_at:
+            return {"already_active": True}
+
+        provider = await run_in_threadpool(_gmail_provider)
+        await run_in_threadpool(provider.restore, row.provider_message_id)
+
+        row.archived_at = None
+        _log_audit(session, row.tenant_id, "restore", row.id, {"subject": row.subject})
+        await session.commit()
+
+    return {"restored": True, "email_id": email_id}
+
+
+@app.get("/archive/candidates")
+async def archive_candidates(threshold: float = 0.7):
+    """Preview what /archive/auto would archive, without touching anything."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.scalars(
+                select(Email).where(
+                    Email.classified_at.is_not(None),
+                    Email.should_archive.is_(True),
+                    Email.confidence >= threshold,
+                    Email.archived_at.is_(None),
+                )
+            )
+        ).all()
+        return {
+            "count": len(rows),
+            "emails": [
+                {"id": r.id, "subject": r.subject, "sender": r.sender, "confidence": r.confidence}
+                for r in rows
+            ],
+        }
+
+
+@app.post("/archive/auto")
+async def archive_auto(threshold: float = 0.7):
+    """Actually execute the bulk archive for every high-confidence should_archive email."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.scalars(
+                select(Email).where(
+                    Email.classified_at.is_not(None),
+                    Email.should_archive.is_(True),
+                    Email.confidence >= threshold,
+                    Email.archived_at.is_(None),
+                )
+            )
+        ).all()
+
+        provider = await run_in_threadpool(_gmail_provider)
+        archived = 0
+        for row in rows:
+            await run_in_threadpool(provider.archive, row.provider_message_id)
+            row.archived_at = datetime.now(timezone.utc)
+            _log_audit(session, row.tenant_id, "archive", row.id, {"subject": row.subject, "auto": True})
+            archived += 1
+
+        await session.commit()
+
+    return {"archived": archived}
+
+
+class CorrectionRequest(BaseModel):
+    field: str  # "should_archive" | "urgency"
+    corrected_value: str
+    note: str | None = None
+
+
+@app.post("/emails/{email_id}/correct")
+async def correct_one(email_id: int, body: CorrectionRequest):
+    if body.field not in ("should_archive", "urgency"):
+        raise HTTPException(400, "field must be 'should_archive' or 'urgency'")
+
+    async with SessionLocal() as session:
+        row = await session.get(Email, email_id)
+        if not row:
+            raise HTTPException(404, "email not found")
+
+        previous_value = str(getattr(row, body.field))
+        session.add(
+            Correction(
+                tenant_id=row.tenant_id,
+                email_id=row.id,
+                field=body.field,
+                previous_value=previous_value,
+                corrected_value=body.corrected_value,
+                note=body.note,
+            )
+        )
+
+        if body.field == "should_archive":
+            new_value = body.corrected_value.lower() == "true"
+            row.should_archive = new_value
+            if new_value is False and row.archived_at:
+                provider = await run_in_threadpool(_gmail_provider)
+                await run_in_threadpool(provider.restore, row.provider_message_id)
+                row.archived_at = None
+        else:
+            row.urgency = body.corrected_value
+
+        _log_audit(
+            session,
+            row.tenant_id,
+            "correction",
+            row.id,
+            {"field": body.field, "previous": previous_value, "corrected": body.corrected_value},
+        )
+        await session.commit()
+
+    return {"corrected": True, "email_id": email_id, "field": body.field}
+
+
+@app.get("/digest")
+async def daily_digest():
+    """Emails needing attention: unarchived, not low-urgency, ranked by recency."""
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+
+        needs_attention = (
+            await session.scalars(
+                select(Email)
+                .where(
+                    Email.archived_at.is_(None),
+                    Email.classified_at.is_not(None),
+                    Email.urgency.in_(["high", "medium"]),
+                )
+                .order_by(Email.urgency.asc(), Email.received_at.desc())
+                .limit(50)
+            )
+        ).all()
+
+        total = await session.scalar(
+            select(func.count()).select_from(Email).where(Email.tenant_id == tenant.id)
+        )
+        archived = await session.scalar(
+            select(func.count()).select_from(Email).where(
+                Email.tenant_id == tenant.id, Email.archived_at.is_not(None)
+            )
+        )
+        unclassified = await session.scalar(
+            select(func.count()).select_from(Email).where(
+                Email.tenant_id == tenant.id, Email.classified_at.is_(None)
+            )
+        )
+
+        return {
+            "mailbox_total": total,
+            "archived_total": archived,
+            "unclassified_total": unclassified,
+            "needs_attention": [
+                {
+                    "id": r.id,
+                    "subject": r.subject,
+                    "sender": r.sender,
+                    "urgency": r.urgency,
+                    "reasoning": r.reasoning,
+                    "received_at": r.received_at.isoformat(),
+                }
+                for r in needs_attention
+            ],
+        }
+
+
+class ChatRequest(BaseModel):
+    message: str
+    email_id: int | None = None
+
+
+@app.post("/chat")
+async def chat(body: ChatRequest):
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        intent = await run_in_threadpool(classify_intent, body.message)
+
+        if intent == "correction":
+            if body.email_id is None:
+                return {"intent": intent, "error": "correction requires email_id"}
+            # Defer to the dedicated endpoint's logic for a should_archive flip —
+            # simplest correction: treat the message as "don't archive this".
+            row = await session.get(Email, body.email_id)
+            if not row:
+                raise HTTPException(404, "email not found")
+            previous = str(row.should_archive)
+            row.should_archive = False
+            if row.archived_at:
+                provider = await run_in_threadpool(_gmail_provider)
+                await run_in_threadpool(provider.restore, row.provider_message_id)
+                row.archived_at = None
+            session.add(
+                Correction(
+                    tenant_id=row.tenant_id,
+                    email_id=row.id,
+                    field="should_archive",
+                    previous_value=previous,
+                    corrected_value="False",
+                    note=body.message,
+                )
+            )
+            _log_audit(session, row.tenant_id, "correction", row.id, {"via": "chat", "message": body.message})
+            await session.commit()
+            return {"intent": intent, "applied_to_email_id": row.id}
+
+        if intent == "rule":
+            rule_data = await run_in_threadpool(extract_rule, body.message)
+            rule = Rule(
+                tenant_id=tenant.id,
+                match_field=rule_data["match_field"],
+                match_value=rule_data["match_value"],
+                should_archive=bool(rule_data["should_archive"]),
+                urgency=rule_data.get("urgency", "low"),
+            )
+            session.add(rule)
+            _log_audit(session, tenant.id, "rule_created", detail=rule_data)
+            await session.commit()
+            return {"intent": intent, "rule": rule_data}
+
+        answer = await run_in_threadpool(answer_question, body.message, tenant.id)
+        return {"intent": "question", "answer": answer}
+
+
+@app.get("/rules")
+async def list_rules():
+    async with SessionLocal() as session:
+        rows = (await session.scalars(select(Rule))).all()
+        return [
+            {
+                "id": r.id,
+                "match_field": r.match_field,
+                "match_value": r.match_value,
+                "should_archive": r.should_archive,
+                "urgency": r.urgency,
+            }
+            for r in rows
         ]

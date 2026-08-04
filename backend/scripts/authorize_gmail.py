@@ -17,7 +17,7 @@ if __name__ == "__main__":
     provider.authenticate()
     print(f"Authorized. Token saved to {GMAIL_TOKEN_PATH}")
 
-    emails = provider.fetch_new_emails()
+    emails = provider.fetch_new_emails(max_results=5)
     print(f"Fetched {len(emails)} recent emails:")
     for e in emails[:5]:
         line = f"  - [{e.received_at}] {e.subject!r} from {e.sender}"

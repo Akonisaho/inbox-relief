@@ -13,10 +13,9 @@ from googleapiclient.discovery import build
 
 from app.providers.base import MailProvider, NormalizedEmail
 
-# Read-only for now — this is all Day 1-2 ingestion needs. archive()/restore()
-# below require the gmail.modify scope; bump SCOPES and re-run auth_script.py
-# once the Archive & Feedback Service module is built.
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# gmail.modify covers both read and label-change access (archive/restore),
+# short of permanent delete or account settings changes.
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 ARCHIVED_LABEL_NAME = "Archived-By-System"
 

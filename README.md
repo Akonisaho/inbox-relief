@@ -10,10 +10,14 @@ roadmap, security/POPIA notes) — not included in this repo.
 
 ## Status
 
-Gmail ingestion, Postgres persistence, and RAG retrieval all proven
-end-to-end: ~2,000 real emails synced, embedded, and semantically searchable.
-No second provider (Outlook skipped for now — see project notes), no
-classification/archival logic yet, no frontend — see `backend/app/main.py`.
+Backend is functionally complete for the MVP loop: Gmail ingestion → Postgres
+persistence → RAG retrieval (Qdrant) → LLM classification (urgency +
+archive-worthiness) → real archive/restore execution → corrections/rules
+feedback loop → unified chat (question/rule/correction intent) → daily
+digest. All proven end-to-end against ~2,000 real emails from a live Gmail
+account. No second provider (Outlook skipped for now — see project notes),
+**no frontend yet** — everything is only reachable via raw API calls, see
+`backend/app/main.py`.
 
 Outlook is intentionally not implemented yet: the `MailProvider` interface
 supports adding it later as a bounded, additive piece of work whenever a
@@ -80,6 +84,24 @@ uvicorn app.main:app --reload
 - `GET /emails` — list stored emails
 - `GET /index/gmail` — embed any stored emails not yet embedded and upsert into Qdrant
 - `GET /search?q=...` — semantic search over embedded emails (proves RAG retrieval)
+- `GET /classify/gmail?limit=20` — judge urgency + archive-worthiness via local LLM + RAG
+  (rules are checked first and skip the LLM when matched); bounded by default, CPU inference
+  is slow (~10-25s/email for llama3.1:8b)
+- `GET /emails/classified` — list classified emails with their judgments
+- `POST /emails/{id}/archive`, `POST /emails/{id}/restore` — real Gmail label changes
+  (archive is never a permanent delete)
+- `GET /archive/candidates?threshold=0.7` — preview what auto-archive would do, no side effects
+- `POST /archive/auto?threshold=0.7` — actually execute bulk archive for high-confidence candidates
+- `POST /emails/{id}/correct` — record a correction (`field`: `should_archive`|`urgency`,
+  `corrected_value`, optional `note`); reverses an archive if applicable
+- `GET /digest` — mailbox stats + emails needing attention (unarchived, medium/high urgency)
+- `POST /chat` — free-text message (`message`, optional `email_id`); classifies intent as
+  correction/rule/question and acts accordingly (rules feed back into `/classify/gmail`)
+- `GET /rules` — list standing rules created via chat
+
+Note: resetting `classified_at` to force reclassification does NOT clear the old
+`should_archive`/`confidence`/`urgency`/`reasoning` values — clear those explicitly too, or the
+archive-candidate queries will act on stale judgments (a real bug caught during testing).
 
 If you're behind a corporate proxy/antivirus that does TLS inspection, you may
 hit `SSLCertVerificationError: self-signed certificate in certificate chain`.
@@ -94,13 +116,15 @@ backend/
   app/
     providers/
       base.py        # MailProvider interface + NormalizedEmail shape
-      gmail.py        # Gmail adapter (OAuth, fetch, archive/restore)
+      gmail.py        # Gmail adapter (OAuth, fetch, archive/restore — needs gmail.modify scope)
     config.py
     db.py             # SQLAlchemy async engine/session
-    models.py         # Tenant, User, Email ORM models
+    models.py         # Tenant, User, Email, Correction, AuditLog, Rule ORM models
     embeddings.py      # Ollama embedding calls
     vectorstore.py      # Qdrant collection per tenant
-    main.py            # FastAPI app
+    inference.py        # LLM classification (urgency, archive-worthiness) via RAG
+    chat.py              # Unified chat: intent classification + rule extraction + Q&A
+    main.py            # FastAPI app — all endpoints
   scripts/
     authorize_gmail.py
   secrets/          # git-ignored — credentials.json, token.json live here
