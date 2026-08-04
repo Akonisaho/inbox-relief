@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  /* Warm, editorial palette — deliberately not the purple/blue "AI startup" look */
+  --color-ink: #1c1a2b;
+  --color-ink-soft: #4a4658;
+  --color-paper: #faf6ef;
+  --color-surface: #ffffff;
+  --color-border: #e6ddc9;
+
+  --color-rust: #c05621;
+  --color-rust-soft: #f3e1d3;
+  --color-moss: #4f6f52;
+  --color-moss-soft: #e2ead9;
+  --color-amber: #b8860b;
+  --color-amber-soft: #f3e6c4;
+
+  --font-sans: 'Segoe UI', system-ui, Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}

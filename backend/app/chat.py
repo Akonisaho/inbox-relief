@@ -2,60 +2,44 @@ import json
 
 import ollama
 
-from app.config import INFERENCE_MODEL, OLLAMA_URL
+from app.config import CHAT_MODEL, OLLAMA_URL
 from app.embeddings import embed_text
 from app.vectorstore import search_similar
 
 _client = ollama.Client(host=OLLAMA_URL)
 
-INTENT_PROMPT = """Classify the intent of this message from a user talking to \
-their email triage assistant.
+CHAT_PROMPT = """You are an email triage assistant. A user is messaging you about \
+their inbox. Using the relevant past emails below as context, respond in ONE step:
+
+1. Classify their intent:
+   - "correction": correcting a specific past judgment about an email that already exists
+   - "rule": explicitly setting a standing policy for FUTURE emails — look for \
+"always", "never", "from now on", "whenever"
+   - "question": asking, searching, or wondering about their inbox — this includes \
+ANY message phrased as a question ("?", "any", "do I have", "show me", "is there"). \
+When genuinely ambiguous, prefer "question" — it's the safe, non-mutating default.
+
+2. Based on the intent, fill in ONLY the matching field, leave the others null:
+   - if "question": fill "answer" with a concise answer using the context below
+   - if "rule": fill "rule" with the standing policy to create
+   - if "correction": leave both null (the caller applies it directly)
+
+Relevant past emails:
+{context}
 
 Message: {message}
 
-- "correction": the user is correcting a specific past judgment about email(s) \
-that already exist (e.g. "that shouldn't have been archived", "that was actually urgent")
-- "rule": the user is explicitly setting a standing POLICY for how FUTURE \
-emails should be handled — look for words like "always", "never", "from now \
-on", "whenever". Examples: "always archive emails from noreply@x.com", "mark \
-anything from my boss as high urgency"
-- "question": the user is asking, searching, or wondering about their inbox — \
-this includes ANY message phrased as a question (containing "?", "any", "do \
-I have", "show me", "is there", "did I get"), even if it mentions a topic \
-that could also sound rule-like. "Any emails about X?" is a QUESTION about \
-existing mail, not a rule about future mail — do not confuse the two.
-
-When genuinely ambiguous, prefer "question" — it's the safe default and \
-never mutates data, unlike "rule".
-
-Respond with ONLY JSON: {{"intent": "correction" | "rule" | "question"}}
-"""
-
-RULE_EXTRACTION_PROMPT = """Extract a standing email rule from this user message.
-
-Message: {message}
-
-Respond with ONLY JSON:
-{{"match_field": "sender" | "subject", "match_value": "...", "should_archive": true_or_false, "urgency": "high" | "medium" | "low"}}
+Respond with ONLY this JSON shape:
+{{"intent": "correction" | "rule" | "question", "answer": "..." or null, "rule": \
+{{"match_field": "sender" | "subject", "match_value": "...", "should_archive": true_or_false, \
+"urgency": "high" | "medium" | "low"}} or null}}
 """
 
 
-def classify_intent(message: str) -> str:
-    response = _client.generate(
-        model=INFERENCE_MODEL, prompt=INTENT_PROMPT.format(message=message), format="json"
-    )
-    result = json.loads(response["response"])
-    return result.get("intent", "question")
-
-
-def extract_rule(message: str) -> dict:
-    response = _client.generate(
-        model=INFERENCE_MODEL, prompt=RULE_EXTRACTION_PROMPT.format(message=message), format="json"
-    )
-    return json.loads(response["response"])
-
-
-def answer_question(message: str, tenant_id: int) -> str:
+def handle_chat(message: str, tenant_id: int) -> dict:
+    """Single LLM call covering intent classification + the intent's payload —
+    previously this was two sequential calls (classify, then act), roughly
+    doubling latency for every chat turn."""
     vector = embed_text(message)
     similar = search_similar(tenant_id, vector, limit=5)
     context = (
@@ -64,10 +48,12 @@ def answer_question(message: str, tenant_id: int) -> str:
         )
         or "(no relevant emails found)"
     )
-    prompt = (
-        "You are an email assistant. Using only the context below, answer the "
-        f"user's question concisely.\n\nRelevant emails:\n{context}\n\n"
-        f"Question: {message}\n\nAnswer:"
+
+    response = _client.generate(
+        model=CHAT_MODEL,
+        prompt=CHAT_PROMPT.format(context=context, message=message),
+        format="json",
     )
-    response = _client.generate(model=INFERENCE_MODEL, prompt=prompt)
-    return response["response"].strip()
+    result = json.loads(response["response"])
+    result.setdefault("intent", "question")
+    return result

@@ -15,9 +15,11 @@ persistence → RAG retrieval (Qdrant) → LLM classification (urgency +
 archive-worthiness) → real archive/restore execution → corrections/rules
 feedback loop → unified chat (question/rule/correction intent) → daily
 digest. All proven end-to-end against ~2,000 real emails from a live Gmail
-account. No second provider (Outlook skipped for now — see project notes),
-**no frontend yet** — everything is only reachable via raw API calls, see
-`backend/app/main.py`.
+account. No second provider (Outlook skipped for now — see project notes).
+
+Frontend (React + TS + Tailwind) now exists with four views — Digest, Inbox,
+Chat, Rules — talking to the backend via a Vite dev proxy. Custom warm/editorial
+palette (navy/rust/cream), not the default framework look.
 
 Outlook is intentionally not implemented yet: the `MailProvider` interface
 supports adding it later as a bounded, additive piece of work whenever a
@@ -97,7 +99,8 @@ uvicorn app.main:app --reload
 - `GET /digest` — mailbox stats + emails needing attention (unarchived, medium/high urgency)
 - `POST /chat` — free-text message (`message`, optional `email_id`); classifies intent as
   correction/rule/question and acts accordingly (rules feed back into `/classify/gmail`)
-- `GET /rules` — list standing rules created via chat
+- `GET /rules` — list standing rules; `POST /rules` — create one directly (same shape, no chat needed);
+  `DELETE /rules/{id}` — remove one
 
 Note: resetting `classified_at` to force reclassification does NOT clear the old
 `should_archive`/`confidence`/`urgency`/`reasoning` values — clear those explicitly too, or the
@@ -108,6 +111,28 @@ hit `SSLCertVerificationError: self-signed certificate in certificate chain`.
 This is already handled — `truststore.inject_into_ssl()` in
 `app/providers/gmail.py` makes Python trust the Windows certificate store
 instead of the bundled CA list.
+
+Chat uses a separate, smaller/faster model (`CHAT_MODEL`, default
+`llama3.2:3b`) than classification (`INFERENCE_MODEL`, `llama3.1:8b`) — chat
+latency matters more than raw accuracy there, while archive decisions warrant
+the larger model. `/chat` does intent classification + the intent's payload
+(answer/rule) in a single LLM call, not two.
+
+## Frontend setup
+
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Runs on `http://localhost:5173`, proxying `/api/*` to the backend on port 8000
+(see `vite.config.ts`) — no CORS setup needed, run both dev servers side by side.
+
+Four views: **Digest** (stats + emails needing attention), **Inbox** (browse/search/archive/restore
+all classified mail), **Chat**, **Rules** (create/delete standing policies, or use Chat).
+Every email subject links out to open that message in Gmail directly — this app stays read-only,
+replying happens in Gmail itself.
 
 ## Repo layout
 
@@ -128,4 +153,16 @@ backend/
   scripts/
     authorize_gmail.py
   secrets/          # git-ignored — credentials.json, token.json live here
+frontend/
+  src/
+    api.ts               # typed fetch client + gmailLink() deep-link helper
+    App.tsx              # view switcher (digest/inbox/chat/rules)
+    components/
+      Shell.tsx           # sidebar nav + layout
+      DigestView.tsx        # stats + emails needing attention
+      InboxView.tsx          # browse/filter/archive/restore all classified mail
+      ChatPanel.tsx           # chat UI
+      RulesPanel.tsx           # create/list/delete rules
+      QuickRuleButton.tsx       # one-click "always archive this sender"
+      Badge.tsx, StatCard.tsx    # small shared UI pieces
 ```

@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from starlette.concurrency import run_in_threadpool
 
-from app.chat import answer_question, classify_intent, extract_rule
+from app.chat import handle_chat
 from app.config import GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH
 from app.db import SessionLocal, init_models
 from app.embeddings import email_to_embedding_text, embed_text
@@ -219,12 +219,14 @@ async def list_classified_emails():
         return [
             {
                 "id": row.id,
+                "provider_message_id": row.provider_message_id,
                 "subject": row.subject,
                 "sender": row.sender,
                 "urgency": row.urgency,
                 "should_archive": row.should_archive,
                 "confidence": row.confidence,
                 "reasoning": row.reasoning,
+                "archived_at": row.archived_at.isoformat() if row.archived_at else None,
             }
             for row in rows
         ]
@@ -401,14 +403,26 @@ async def daily_digest():
                 Email.tenant_id == tenant.id, Email.classified_at.is_(None)
             )
         )
+        declutter_bytes = await session.scalar(
+            select(func.coalesce(func.sum(func.length(Email.body_text)), 0)).where(
+                Email.tenant_id == tenant.id, Email.archived_at.is_not(None)
+            )
+        )
 
         return {
             "mailbox_total": total,
             "archived_total": archived,
+            "inbox_count": total - archived,
             "unclassified_total": unclassified,
+            # Archiving removes Gmail's Inbox label — it does NOT delete anything or
+            # reduce your actual storage quota (Gmail counts All Mail + Trash the same).
+            # This is an approximate measure of how much has been decluttered from view,
+            # not storage freed.
+            "declutter_kb_approx": round(declutter_bytes / 1024, 1),
             "needs_attention": [
                 {
                     "id": r.id,
+                    "provider_message_id": r.provider_message_id,
                     "subject": r.subject,
                     "sender": r.sender,
                     "urgency": r.urgency,
@@ -429,13 +443,13 @@ class ChatRequest(BaseModel):
 async def chat(body: ChatRequest):
     async with SessionLocal() as session:
         tenant = await _get_default_tenant(session)
-        intent = await run_in_threadpool(classify_intent, body.message)
+        result = await run_in_threadpool(handle_chat, body.message, tenant.id)
+        intent = result["intent"]
 
         if intent == "correction":
             if body.email_id is None:
                 return {"intent": intent, "error": "correction requires email_id"}
-            # Defer to the dedicated endpoint's logic for a should_archive flip —
-            # simplest correction: treat the message as "don't archive this".
+            # Simplest correction: treat the message as "don't archive this".
             row = await session.get(Email, body.email_id)
             if not row:
                 raise HTTPException(404, "email not found")
@@ -460,7 +474,7 @@ async def chat(body: ChatRequest):
             return {"intent": intent, "applied_to_email_id": row.id}
 
         if intent == "rule":
-            rule_data = await run_in_threadpool(extract_rule, body.message)
+            rule_data = result["rule"]
             rule = Rule(
                 tenant_id=tenant.id,
                 match_field=rule_data["match_field"],
@@ -473,8 +487,7 @@ async def chat(body: ChatRequest):
             await session.commit()
             return {"intent": intent, "rule": rule_data}
 
-        answer = await run_in_threadpool(answer_question, body.message, tenant.id)
-        return {"intent": "question", "answer": answer}
+        return {"intent": "question", "answer": result.get("answer")}
 
 
 @app.get("/rules")
@@ -491,3 +504,51 @@ async def list_rules():
             }
             for r in rows
         ]
+
+
+class RuleRequest(BaseModel):
+    match_field: str  # "sender" | "subject"
+    match_value: str
+    should_archive: bool
+    urgency: str = "low"
+
+
+@app.post("/rules")
+async def create_rule(body: RuleRequest):
+    if body.match_field not in ("sender", "subject"):
+        raise HTTPException(400, "match_field must be 'sender' or 'subject'")
+    if body.urgency not in ("high", "medium", "low"):
+        raise HTTPException(400, "urgency must be 'high', 'medium', or 'low'")
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        rule = Rule(
+            tenant_id=tenant.id,
+            match_field=body.match_field,
+            match_value=body.match_value,
+            should_archive=body.should_archive,
+            urgency=body.urgency,
+        )
+        session.add(rule)
+        _log_audit(session, tenant.id, "rule_created", detail=body.model_dump())
+        await session.commit()
+        await session.refresh(rule)
+
+    return {
+        "id": rule.id,
+        "match_field": rule.match_field,
+        "match_value": rule.match_value,
+        "should_archive": rule.should_archive,
+        "urgency": rule.urgency,
+    }
+
+
+@app.delete("/rules/{rule_id}")
+async def delete_rule(rule_id: int):
+    async with SessionLocal() as session:
+        rule = await session.get(Rule, rule_id)
+        if not rule:
+            raise HTTPException(404, "rule not found")
+        await session.delete(rule)
+        await session.commit()
+    return {"deleted": True}
