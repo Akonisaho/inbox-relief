@@ -17,6 +17,7 @@ export interface DigestEmail {
   message_id_header: string
   subject: string
   sender: string
+  snippet: string
   urgency: string
   reasoning: string | null
   received_at: string
@@ -90,6 +91,7 @@ export interface Rule {
   match_value: string
   should_archive: boolean
   urgency: string
+  source_text: string | null
 }
 
 export interface ChatResponse {
@@ -147,7 +149,9 @@ export const api = {
   calendar: (year: number, month: number) =>
     request<CalendarMonth>(`/calendar?year=${year}&month=${month}`),
   calendarDay: (date: string) => request<CalendarDayDetail>(`/calendar/day?date=${date}`),
-  createRule: (rule: Omit<Rule, 'id'>) =>
+  createRule: (rule: Omit<Rule, 'id' | 'source_text'>) =>
     request<Rule>('/rules', { method: 'POST', body: JSON.stringify(rule) }),
+  createRuleFromText: (text: string) =>
+    request<Rule>('/rules/from_text', { method: 'POST', body: JSON.stringify({ text }) }),
   deleteRule: (id: number) => request<{ deleted: boolean }>(`/rules/${id}`, { method: 'DELETE' }),
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, type CalendarMonth } from '../api'
-import { DayDetailPanel } from './DayDetailPanel'
+import { DayDetailPanel, type DayFilter } from './DayDetailPanel'
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -15,6 +15,7 @@ export function CalendarView() {
   const [data, setData] = useState<CalendarMonth | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedFilter, setSelectedFilter] = useState<DayFilter>('all')
 
   useEffect(() => {
     api
@@ -36,6 +37,15 @@ export function CalendarView() {
   const goNext = () => {
     setSelectedDate(null)
     if (month === 12) { setYear((y) => y + 1); setMonth(1) } else setMonth((m) => m + 1)
+  }
+
+  const openWith = (dateStr: string, filter: DayFilter) => {
+    if (dateStr === selectedDate && filter === selectedFilter) {
+      setSelectedDate(null)
+    } else {
+      setSelectedDate(dateStr)
+      setSelectedFilter(filter)
+    }
   }
 
   const firstOfMonth = new Date(Date.UTC(year, month - 1, 1))
@@ -81,40 +91,60 @@ export function CalendarView() {
           const isToday = dateStr === `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
           const isSelected = dateStr === selectedDate
           return (
-            <button
+            <div
               key={dateStr}
-              disabled={!stats}
-              onClick={() => setSelectedDate(isSelected ? null : dateStr)}
-              className={`min-h-20 rounded-md border p-2 text-left transition-colors ${
-                isSelected
-                  ? 'border-ink bg-ink text-paper'
-                  : isToday
-                    ? 'border-rust bg-rust-soft'
-                    : 'border-border bg-surface'
-              } ${stats ? 'cursor-pointer hover:border-ink' : 'cursor-default opacity-60'}`}
+              className={`min-h-20 rounded-md border p-2 text-left ${
+                isSelected ? 'border-ink bg-ink text-paper' : isToday ? 'border-rust bg-rust-soft' : 'border-border bg-surface'
+              }`}
             >
-              <div className={`text-xs font-medium ${isSelected ? 'text-paper/70' : 'text-ink-soft'}`}>
+              <button
+                disabled={!stats}
+                onClick={() => stats && openWith(dateStr, 'all')}
+                className={`text-xs font-medium ${isSelected ? 'text-paper/70' : 'text-ink-soft'} ${stats ? 'cursor-pointer hover:underline' : 'cursor-default opacity-50'}`}
+              >
                 {dayNum}
-              </div>
+              </button>
               {stats ? (
                 <div className="mt-1 space-y-0.5 text-xs">
-                  <div>{stats.received} received</div>
+                  <button onClick={() => openWith(dateStr, 'all')} className="block hover:underline">
+                    {stats.received} received
+                  </button>
                   {stats.high > 0 && (
-                    <div className={isSelected ? 'text-paper' : 'text-rust'}>{stats.high} high</div>
+                    <button
+                      onClick={() => openWith(dateStr, 'high')}
+                      className={`block hover:underline ${isSelected ? 'text-paper' : 'text-rust'}`}
+                    >
+                      {stats.high} high
+                    </button>
                   )}
-                  <div className={isSelected ? 'text-paper/80' : 'text-moss'}>{stats.archived} archived</div>
-                  <div className={isSelected ? 'text-paper/80' : 'text-rust'}>{stats.unread} unread</div>
+                  <button
+                    onClick={() => openWith(dateStr, 'archived')}
+                    className={`block hover:underline ${isSelected ? 'text-paper/80' : 'text-moss'}`}
+                  >
+                    {stats.archived} archived
+                  </button>
+                  <button
+                    onClick={() => openWith(dateStr, 'unread')}
+                    className={`block hover:underline ${isSelected ? 'text-paper/80' : 'text-rust'}`}
+                  >
+                    {stats.unread} unread
+                  </button>
                 </div>
               ) : (
                 <div className="mt-1 text-xs opacity-50">—</div>
               )}
-            </button>
+            </div>
           )
         })}
       </div>
 
       {selectedDate && (
-        <DayDetailPanel date={selectedDate} onClose={() => setSelectedDate(null)} />
+        <DayDetailPanel
+          date={selectedDate}
+          filter={selectedFilter}
+          onFilterChange={setSelectedFilter}
+          onClose={() => setSelectedDate(null)}
+        />
       )}
     </div>
   )

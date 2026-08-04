@@ -7,7 +7,7 @@ from sqlalchemy import Date, case, cast, extract, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from starlette.concurrency import run_in_threadpool
 
-from app.chat import handle_chat
+from app.chat import extract_rule, handle_chat
 from app.config import GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH
 from app.db import SessionLocal, init_models
 from app.embeddings import email_to_embedding_text, embed_text
@@ -168,21 +168,32 @@ def _matches_rule(rule: Rule, subject: str, sender: str) -> bool:
     return rule.match_value.lower() in haystack
 
 
+AUTO_ARCHIVE_CONFIDENCE_THRESHOLD = 0.85
+
+
 @app.get("/classify/gmail")
 async def classify_unclassified_emails(limit: int = 20):
     """Judge urgency + archive-worthiness for unclassified emails via local LLM + RAG.
     Bounded by default — CPU inference is much slower than embedding. Rules are
-    checked first and skip the LLM entirely when matched."""
+    checked first and skip the LLM entirely when matched. Anything judged
+    should_archive at or above AUTO_ARCHIVE_CONFIDENCE_THRESHOLD gets archived
+    immediately — this is the confidence gate: only near-certain, low-value mail
+    archives itself, everything else waits for a human decision."""
+    provider = None  # lazily authenticated only if something actually needs archiving
+
     async with SessionLocal() as session:
         tenant = await _get_default_tenant(session)
         rows = (
             await session.scalars(
-                select(Email).where(Email.classified_at.is_(None)).limit(limit)
+                select(Email)
+                .where(Email.classified_at.is_(None))
+                .order_by(Email.received_at.desc())
+                .limit(limit)
             )
         ).all()
         rules = (await session.scalars(select(Rule).where(Rule.tenant_id == tenant.id))).all()
 
-        classified, rule_matched, failed = 0, 0, []
+        classified, rule_matched, auto_archived, failed = 0, 0, 0, []
         for row in rows:
             matched_rule = next(
                 (r for r in rules if _matches_rule(r, row.subject, row.sender)), None
@@ -194,26 +205,41 @@ async def classify_unclassified_emails(limit: int = 20):
                 row.reasoning = f"Matched rule: {matched_rule.match_field}={matched_rule.match_value!r}"
                 row.classified_at = datetime.now(timezone.utc)
                 rule_matched += 1
-                continue
+            else:
+                try:
+                    result = await run_in_threadpool(
+                        classify_email, tenant.id, row.subject, row.sender, row.body_text, row.snippet
+                    )
+                except ClassificationError as e:
+                    failed.append({"id": row.id, "subject": row.subject, "error": str(e)})
+                    continue
 
-            try:
-                result = await run_in_threadpool(
-                    classify_email, tenant.id, row.subject, row.sender, row.body_text, row.snippet
+                row.urgency = result["urgency"]
+                row.should_archive = bool(result["should_archive"])
+                row.confidence = float(result["confidence"])
+                row.reasoning = result["reasoning"]
+                row.classified_at = datetime.now(timezone.utc)
+                classified += 1
+
+            if row.should_archive and row.confidence >= AUTO_ARCHIVE_CONFIDENCE_THRESHOLD:
+                if provider is None:
+                    provider = await run_in_threadpool(_gmail_provider)
+                await run_in_threadpool(provider.archive, row.provider_message_id)
+                row.archived_at = datetime.now(timezone.utc)
+                _log_audit(
+                    session, row.tenant_id, "archive", row.id,
+                    {"subject": row.subject, "auto": True, "via": "classify", "confidence": row.confidence},
                 )
-            except ClassificationError as e:
-                failed.append({"id": row.id, "subject": row.subject, "error": str(e)})
-                continue
-
-            row.urgency = result["urgency"]
-            row.should_archive = bool(result["should_archive"])
-            row.confidence = float(result["confidence"])
-            row.reasoning = result["reasoning"]
-            row.classified_at = datetime.now(timezone.utc)
-            classified += 1
+                auto_archived += 1
 
         await session.commit()
 
-    return {"classified": classified, "rule_matched": rule_matched, "failed": failed}
+    return {
+        "classified": classified,
+        "rule_matched": rule_matched,
+        "auto_archived": auto_archived,
+        "failed": failed,
+    }
 
 
 @app.get("/emails/classified")
@@ -407,7 +433,9 @@ async def correct_one(email_id: int, body: CorrectionRequest):
 
 @app.get("/digest")
 async def daily_digest():
-    """Emails needing attention: unarchived, not low-urgency, ranked by recency."""
+    """Emails needing attention TODAY: unarchived, not low-urgency, received today."""
+    today = datetime.now(timezone.utc).date()
+
     async with SessionLocal() as session:
         tenant = await _get_default_tenant(session)
 
@@ -418,6 +446,7 @@ async def daily_digest():
                     Email.archived_at.is_(None),
                     Email.classified_at.is_not(None),
                     Email.urgency.in_(["high", "medium"]),
+                    cast(Email.received_at, Date) == today,
                 )
                 .order_by(Email.urgency.asc(), Email.received_at.desc())
                 .limit(50)
@@ -460,6 +489,7 @@ async def daily_digest():
                     "message_id_header": r.message_id_header,
                     "subject": r.subject,
                     "sender": r.sender,
+                    "snippet": r.snippet,
                     "urgency": r.urgency,
                     "reasoning": r.reasoning,
                     "received_at": r.received_at.isoformat(),
@@ -516,9 +546,10 @@ async def chat(body: ChatRequest):
                 match_value=rule_data["match_value"],
                 should_archive=bool(rule_data["should_archive"]),
                 urgency=rule_data.get("urgency", "low"),
+                source_text=body.message,
             )
             session.add(rule)
-            _log_audit(session, tenant.id, "rule_created", detail=rule_data)
+            _log_audit(session, tenant.id, "rule_created", detail={**rule_data, "source_text": body.message})
             await session.commit()
             return {"intent": intent, "rule": rule_data}
 
@@ -536,6 +567,7 @@ async def list_rules():
                 "match_value": r.match_value,
                 "should_archive": r.should_archive,
                 "urgency": r.urgency,
+                "source_text": r.source_text,
             }
             for r in rows
         ]
@@ -575,6 +607,42 @@ async def create_rule(body: RuleRequest):
         "match_value": rule.match_value,
         "should_archive": rule.should_archive,
         "urgency": rule.urgency,
+        "source_text": rule.source_text,
+    }
+
+
+class RuleFromTextRequest(BaseModel):
+    text: str
+
+
+@app.post("/rules/from_text")
+async def create_rule_from_text(body: RuleFromTextRequest):
+    """Write a rule in plain language instead of filling in a form — same
+    extraction the chat 'rule' intent uses."""
+    rule_data = await run_in_threadpool(extract_rule, body.text)
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        rule = Rule(
+            tenant_id=tenant.id,
+            match_field=rule_data["match_field"],
+            match_value=rule_data["match_value"],
+            should_archive=bool(rule_data["should_archive"]),
+            urgency=rule_data.get("urgency", "low"),
+            source_text=body.text,
+        )
+        session.add(rule)
+        _log_audit(session, tenant.id, "rule_created", detail={**rule_data, "source_text": body.text})
+        await session.commit()
+        await session.refresh(rule)
+
+    return {
+        "id": rule.id,
+        "match_field": rule.match_field,
+        "match_value": rule.match_value,
+        "should_archive": rule.should_archive,
+        "urgency": rule.urgency,
+        "source_text": rule.source_text,
     }
 
 

@@ -36,6 +36,25 @@ Respond with ONLY this JSON shape:
 """
 
 
+RULE_EXTRACTION_PROMPT = """Extract a standing email rule from this text, written \
+in the user's own words.
+
+Text: {text}
+
+Respond with ONLY JSON:
+{{"match_field": "sender" | "subject", "match_value": "...", "should_archive": true_or_false, "urgency": "high" | "medium" | "low"}}
+"""
+
+
+def extract_rule(text: str) -> dict:
+    """Used when the caller already knows it's a rule (e.g. a dedicated
+    'write a rule' box) — no intent classification needed, unlike handle_chat."""
+    response = _client.generate(
+        model=CHAT_MODEL, prompt=RULE_EXTRACTION_PROMPT.format(text=text), format="json"
+    )
+    return json.loads(response["response"])
+
+
 def handle_chat(message: str, tenant_id: int) -> dict:
     """Single LLM call covering intent classification + the intent's payload —
     previously this was two sequential calls (classify, then act), roughly

@@ -98,4 +98,5 @@ class Rule(Base):
     match_value: Mapped[str]  # substring match, case-insensitive
     should_archive: Mapped[bool]
     urgency: Mapped[str] = mapped_column(default="low")
+    source_text: Mapped[str | None] = mapped_column(default=None)  # original free-text, if written that way
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

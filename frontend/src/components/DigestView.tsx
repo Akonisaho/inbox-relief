@@ -86,8 +86,11 @@ export function DigestView() {
                     <span className="truncate font-medium">{e.subject}</span>
                   </div>
                   <div className="mt-1 text-sm text-ink-soft">{e.sender}</div>
+                  {e.snippet && (
+                    <div className="mt-2 text-sm text-ink-soft">{e.snippet}</div>
+                  )}
                   {e.reasoning && (
-                    <div className="mt-2 text-sm italic text-ink-soft">"{e.reasoning}"</div>
+                    <div className="mt-1 text-xs italic text-ink-soft/70">Why: {e.reasoning}</div>
                   )}
                   <div className="mt-2 flex items-center gap-3">
                     <EmailExpando emailId={e.id} />

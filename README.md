@@ -88,7 +88,11 @@ uvicorn app.main:app --reload
 - `GET /search?q=...` — semantic search over embedded emails (proves RAG retrieval)
 - `GET /classify/gmail?limit=20` — judge urgency + archive-worthiness via local LLM + RAG
   (rules are checked first and skip the LLM when matched); bounded by default, CPU inference
-  is slow (~10-25s/email for llama3.1:8b)
+  is slow (~10-25s/email for llama3.1:8b). Processes newest-unclassified-first. Anything judged
+  `should_archive` at confidence ≥ `AUTO_ARCHIVE_CONFIDENCE_THRESHOLD` (0.85) is archived
+  immediately — this is the confidence gate: only near-certain low-value mail auto-archives,
+  everything else waits for a human decision via `/archive/candidates` + `/archive/auto` or
+  the UI
 - `GET /emails/classified` — list classified emails with their judgments
 - `POST /emails/{id}/archive`, `POST /emails/{id}/restore` — real Gmail label changes
   (archive is never a permanent delete)
@@ -96,11 +100,16 @@ uvicorn app.main:app --reload
 - `POST /archive/auto?threshold=0.7` — actually execute bulk archive for high-confidence candidates
 - `POST /emails/{id}/correct` — record a correction (`field`: `should_archive`|`urgency`,
   `corrected_value`, optional `note`); reverses an archive if applicable
-- `GET /digest` — mailbox stats + emails needing attention (unarchived, medium/high urgency)
+- `GET /digest` — mailbox stats + emails needing attention **received today** (unarchived,
+  medium/high urgency) — deliberately date-scoped, not an ever-growing backlog
+- `GET /calendar?year&month` — per-day received/archived/unread/high-urgency counts
+- `GET /calendar/day?date=YYYY-MM-DD` — full email list for one day (calendar drill-down)
 - `POST /chat` — free-text message (`message`, optional `email_id`); classifies intent as
   correction/rule/question and acts accordingly (rules feed back into `/classify/gmail`)
-- `GET /rules` — list standing rules; `POST /rules` — create one directly (same shape, no chat needed);
-  `DELETE /rules/{id}` — remove one
+- `GET /rules` — list standing rules; `POST /rules` — create one from structured fields;
+  `POST /rules/from_text` — create one from plain language (e.g. "emails from Acme are not
+  important, archive them") using the same LLM extraction chat uses, stores the original text
+  as `source_text` for display; `DELETE /rules/{id}` — remove one (now audit-logged)
 
 Note: resetting `classified_at` to force reclassification does NOT clear the old
 `should_archive`/`confidence`/`urgency`/`reasoning` values — clear those explicitly too, or the
@@ -129,10 +138,16 @@ npm run dev
 Runs on `http://localhost:5173`, proxying `/api/*` to the backend on port 8000
 (see `vite.config.ts`) — no CORS setup needed, run both dev servers side by side.
 
-Four views: **Digest** (stats + emails needing attention), **Inbox** (browse/search/archive/restore
-all classified mail), **Chat**, **Rules** (create/delete standing policies, or use Chat).
-Every email subject links out to open that message in Gmail directly — this app stays read-only,
-replying happens in Gmail itself.
+Five views: **Digest** (today's stats + emails needing attention today), **Inbox**
+(browse/search/filter by urgency/archive/restore all classified mail), **Calendar** (per-day
+counts, click any day or a specific stat like "high"/"unread"/"archived" to drill into that
+exact list), **Chat**, **Rules** (write one in plain language, or use the manual form).
+
+Every email has a "Read email" expander (fetches full content on demand) plus a "Reply in
+Gmail" button using a reliable RFC822 Message-ID search deep link — not Gmail's internal
+message ID, which doesn't reliably deep-link since Gmail's web UI is thread-centric. This app
+stays read-only; replying happens in Gmail itself, and Gmail has no officially reliable way to
+deep-link straight into reply/compose mode, so we don't pretend otherwise.
 
 ## Repo layout
 
@@ -156,13 +171,16 @@ backend/
 frontend/
   src/
     api.ts               # typed fetch client + gmailLink() deep-link helper
-    App.tsx              # view switcher (digest/inbox/chat/rules)
+    App.tsx              # view switcher (digest/inbox/calendar/chat/rules)
     components/
       Shell.tsx           # sidebar nav + layout
-      DigestView.tsx        # stats + emails needing attention
-      InboxView.tsx          # browse/filter/archive/restore all classified mail
-      ChatPanel.tsx           # chat UI
-      RulesPanel.tsx           # create/list/delete rules
-      QuickRuleButton.tsx       # one-click "always archive this sender"
-      Badge.tsx, StatCard.tsx    # small shared UI pieces
+      DigestView.tsx        # today's stats + emails needing attention today
+      InboxView.tsx          # browse/filter (status + urgency)/archive/restore all classified mail
+      CalendarView.tsx        # per-day counts, click a day or a stat to drill down
+      DayDetailPanel.tsx       # calendar drill-down: full/filtered email list for one day
+      ChatPanel.tsx             # chat UI
+      RulesPanel.tsx             # write a rule in plain language, or use the manual form
+      QuickRuleButton.tsx         # one-click "always archive this sender"
+      EmailExpando.tsx             # in-app "Read email" + "Reply in Gmail" expander
+      Badge.tsx, StatCard.tsx       # small shared UI pieces
 ```

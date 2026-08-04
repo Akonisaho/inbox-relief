@@ -1,9 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api, type CalendarDayEmail } from '../api'
 import { UrgencyBadge } from './Badge'
 import { EmailExpando } from './EmailExpando'
 
-export function DayDetailPanel({ date, onClose }: { date: string; onClose: () => void }) {
+export type DayFilter = 'all' | 'high' | 'archived' | 'unread'
+
+const FILTER_LABELS: Record<DayFilter, string> = {
+  all: 'All',
+  high: 'High urgency',
+  archived: 'Archived',
+  unread: 'Unread',
+}
+
+export function DayDetailPanel({
+  date,
+  filter,
+  onFilterChange,
+  onClose,
+}: {
+  date: string
+  filter: DayFilter
+  onFilterChange: (f: DayFilter) => void
+  onClose: () => void
+}) {
   const [emails, setEmails] = useState<CalendarDayEmail[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -15,27 +34,55 @@ export function DayDetailPanel({ date, onClose }: { date: string; onClose: () =>
       .catch((e) => setError(String(e)))
   }, [date])
 
+  const visible = useMemo(() => {
+    if (!emails) return null
+    switch (filter) {
+      case 'high':
+        return emails.filter((e) => e.urgency === 'high')
+      case 'archived':
+        return emails.filter((e) => e.archived_at)
+      case 'unread':
+        return emails.filter((e) => e.is_unread)
+      default:
+        return emails
+    }
+  }, [emails, filter])
+
   return (
     <div className="mt-6 rounded-lg border border-border bg-surface p-4">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-soft">
-          {date} — {emails ? `${emails.length} email${emails.length === 1 ? '' : 's'}` : '…'}
+          {date} — {visible ? `${visible.length} email${visible.length === 1 ? '' : 's'}` : '…'}
         </h2>
         <button onClick={onClose} className="text-sm text-ink-soft hover:text-rust">
           ✕ Close
         </button>
       </div>
 
-      {error && <div className="text-rust">{error}</div>}
-      {!emails && !error && <div className="text-sm text-ink-soft">Loading…</div>}
+      <div className="mb-3 flex gap-2">
+        {(Object.keys(FILTER_LABELS) as DayFilter[]).map((f) => (
+          <button
+            key={f}
+            onClick={() => onFilterChange(f)}
+            className={`rounded-full px-3 py-1 text-xs font-medium ${
+              filter === f ? 'bg-ink text-paper' : 'bg-paper text-ink-soft border border-border'
+            }`}
+          >
+            {FILTER_LABELS[f]}
+          </button>
+        ))}
+      </div>
 
-      {emails && emails.length === 0 && (
-        <div className="text-sm text-ink-soft">No emails on this day.</div>
+      {error && <div className="text-rust">{error}</div>}
+      {!visible && !error && <div className="text-sm text-ink-soft">Loading…</div>}
+
+      {visible && visible.length === 0 && (
+        <div className="text-sm text-ink-soft">No emails match this filter.</div>
       )}
 
-      {emails && emails.length > 0 && (
+      {visible && visible.length > 0 && (
         <ul className="flex flex-col gap-2">
-          {emails.map((e) => (
+          {visible.map((e) => (
             <li key={e.id} className="rounded-md border border-border bg-paper px-3 py-2">
               <div className="flex items-center gap-2">
                 <UrgencyBadge urgency={e.urgency} />
