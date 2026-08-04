@@ -10,8 +10,14 @@ roadmap, security/POPIA notes) — not included in this repo.
 
 ## Status
 
-Day 1-2 of the build: Gmail ingestion proven end-to-end (auth + fetch). No
-persistence, no second provider, no RAG, no frontend yet — see `backend/app/main.py`.
+Gmail ingestion proven end-to-end (auth + fetch + persist to Postgres, with
+dedup on repeated syncs). No second provider (Outlook skipped for now — see
+project notes), no RAG, no frontend yet — see `backend/app/main.py`.
+
+Outlook is intentionally not implemented yet: the `MailProvider` interface
+supports adding it later as a bounded, additive piece of work whenever a
+usable Microsoft account is available (school tenants often block app
+registration for students).
 
 ## Backend setup
 
@@ -32,13 +38,33 @@ First-time Gmail authorization (opens a browser consent screen):
 python scripts/authorize_gmail.py
 ```
 
-Run the dev API:
+### Postgres (dev)
+
+Runs on host port **5433** (not 5432) to avoid clashing with other local
+Postgres containers:
+
+```
+docker run --name inbox-relief-pg -e POSTGRES_PASSWORD=devpassword -e POSTGRES_DB=inbox_relief -p 5433:5432 -d postgres:16
+```
+
+Tables are created automatically on API startup (`app/db.py: init_models`) —
+no manual migration step yet (fine for MVP; revisit with Alembic if the schema
+needs to evolve without dropping data).
+
+### Running the API
 
 ```
 uvicorn app.main:app --reload
 ```
 
-Then hit `http://127.0.0.1:8000/ingest/gmail/sync` to pull recent emails.
+- `GET /ingest/gmail/sync` — fetch recent Gmail messages and upsert into Postgres
+- `GET /emails` — list stored emails
+
+If you're behind a corporate proxy/antivirus that does TLS inspection, you may
+hit `SSLCertVerificationError: self-signed certificate in certificate chain`.
+This is already handled — `truststore.inject_into_ssl()` in
+`app/providers/gmail.py` makes Python trust the Windows certificate store
+instead of the bundled CA list.
 
 ## Repo layout
 
