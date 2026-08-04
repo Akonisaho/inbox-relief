@@ -47,3 +47,9 @@ class Email(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    urgency: Mapped[str | None] = mapped_column(default=None)
+    should_archive: Mapped[bool | None] = mapped_column(default=None)
+    confidence: Mapped[float | None] = mapped_column(default=None)
+    reasoning: Mapped[str | None] = mapped_column(default=None)
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

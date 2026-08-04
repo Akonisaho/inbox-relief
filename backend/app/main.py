@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import GMAIL_CREDENTIALS_PATH, GMAIL_TOKEN_PATH
 from app.db import SessionLocal, init_models
 from app.embeddings import email_to_embedding_text, embed_text
+from app.inference import ClassificationError, classify_email
 from app.models import Email, Tenant
 from app.providers.gmail import GmailProvider
 from app.vectorstore import search_similar, upsert_email_vector
@@ -134,3 +135,61 @@ async def search_emails(q: str, limit: int = 5):
     vector = await run_in_threadpool(embed_text, q)
     results = await run_in_threadpool(search_similar, tenant.id, vector, limit)
     return {"query": q, "results": results}
+
+
+@app.get("/classify/gmail")
+async def classify_unclassified_emails(limit: int = 20):
+    """Judge urgency + archive-worthiness for unclassified emails via local LLM + RAG.
+    Bounded by default — CPU inference is much slower than embedding."""
+    async with SessionLocal() as session:
+        tenant = await session.scalar(select(Tenant).where(Tenant.name == DEFAULT_TENANT_NAME))
+        rows = (
+            await session.scalars(
+                select(Email).where(Email.classified_at.is_(None)).limit(limit)
+            )
+        ).all()
+
+        classified, failed = 0, []
+        for row in rows:
+            try:
+                result = await run_in_threadpool(
+                    classify_email, tenant.id, row.subject, row.sender, row.body_text, row.snippet
+                )
+            except ClassificationError as e:
+                failed.append({"id": row.id, "subject": row.subject, "error": str(e)})
+                continue
+
+            row.urgency = result["urgency"]
+            row.should_archive = bool(result["should_archive"])
+            row.confidence = float(result["confidence"])
+            row.reasoning = result["reasoning"]
+            row.classified_at = datetime.now(timezone.utc)
+            classified += 1
+
+        await session.commit()
+
+    return {"classified": classified, "failed": failed}
+
+
+@app.get("/emails/classified")
+async def list_classified_emails():
+    async with SessionLocal() as session:
+        rows = (
+            await session.scalars(
+                select(Email)
+                .where(Email.classified_at.is_not(None))
+                .order_by(Email.received_at.desc())
+            )
+        ).all()
+        return [
+            {
+                "id": row.id,
+                "subject": row.subject,
+                "sender": row.sender,
+                "urgency": row.urgency,
+                "should_archive": row.should_archive,
+                "confidence": row.confidence,
+                "reasoning": row.reasoning,
+            }
+            for row in rows
+        ]

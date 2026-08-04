@@ -17,3 +17,4 @@ DATABASE_URL = os.getenv(
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6335")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+INFERENCE_MODEL = os.getenv("INFERENCE_MODEL", "llama3.1:8b")
