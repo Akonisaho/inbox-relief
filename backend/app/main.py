@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import Date, case, cast, extract, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from starlette.concurrency import run_in_threadpool
 
@@ -65,30 +65,40 @@ async def sync_gmail(limit: int | None = 200):
 
         stored = 0
         for e in emails:
+            ingestion_fields = {
+                "thread_id": e.thread_id,
+                "subject": e.subject,
+                "sender": e.sender,
+                "recipients": e.recipients,
+                "received_at": e.received_at,
+                "snippet": e.snippet,
+                "body_text": e.body_text,
+                "message_id_header": e.message_id_header,
+                "labels": e.labels,
+                "is_unread": e.is_unread,
+            }
             stmt = (
                 pg_insert(Email)
                 .values(
                     tenant_id=tenant.id,
                     provider=e.provider,
                     provider_message_id=e.provider_message_id,
-                    thread_id=e.thread_id,
-                    subject=e.subject,
-                    sender=e.sender,
-                    recipients=e.recipients,
-                    received_at=e.received_at,
-                    snippet=e.snippet,
-                    body_text=e.body_text,
-                    labels=e.labels,
-                    is_unread=e.is_unread,
+                    **ingestion_fields,
                 )
-                .on_conflict_do_nothing(index_elements=["provider", "provider_message_id"])
+                # Update on conflict rather than no-op: this self-heals rows that
+                # predate a new ingestion field (e.g. message_id_header) without
+                # ever touching app-owned state (archived_at, classification, etc).
+                .on_conflict_do_update(
+                    index_elements=["provider", "provider_message_id"],
+                    set_=ingestion_fields,
+                )
             )
-            result = await session.execute(stmt)
-            stored += result.rowcount
+            await session.execute(stmt)
+            stored += 1
 
         await session.commit()
 
-    return {"fetched": len(emails), "newly_stored": stored}
+    return {"fetched": len(emails), "newly_stored_or_updated": stored}
 
 
 @app.get("/emails")
@@ -220,6 +230,7 @@ async def list_classified_emails():
             {
                 "id": row.id,
                 "provider_message_id": row.provider_message_id,
+                "message_id_header": row.message_id_header,
                 "subject": row.subject,
                 "sender": row.sender,
                 "urgency": row.urgency,
@@ -230,6 +241,29 @@ async def list_classified_emails():
             }
             for row in rows
         ]
+
+
+@app.get("/emails/{email_id}")
+async def get_email(email_id: int):
+    """Full content for in-app reading, fetched on demand rather than bundled
+    into list responses (body text would bloat those for no benefit)."""
+    async with SessionLocal() as session:
+        row = await session.get(Email, email_id)
+        if not row:
+            raise HTTPException(404, "email not found")
+        return {
+            "id": row.id,
+            "message_id_header": row.message_id_header,
+            "subject": row.subject,
+            "sender": row.sender,
+            "recipients": row.recipients,
+            "received_at": row.received_at.isoformat(),
+            "body_text": row.body_text,
+            "urgency": row.urgency,
+            "should_archive": row.should_archive,
+            "reasoning": row.reasoning,
+            "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+        }
 
 
 @app.post("/emails/{email_id}/archive")
@@ -423,6 +457,7 @@ async def daily_digest():
                 {
                     "id": r.id,
                     "provider_message_id": r.provider_message_id,
+                    "message_id_header": r.message_id_header,
                     "subject": r.subject,
                     "sender": r.sender,
                     "urgency": r.urgency,
@@ -549,6 +584,89 @@ async def delete_rule(rule_id: int):
         rule = await session.get(Rule, rule_id)
         if not rule:
             raise HTTPException(404, "rule not found")
+        detail = {"match_field": rule.match_field, "match_value": rule.match_value}
         await session.delete(rule)
+        _log_audit(session, rule.tenant_id, "rule_deleted", detail=detail)
         await session.commit()
     return {"deleted": True}
+
+
+@app.get("/calendar")
+async def calendar(year: int | None = None, month: int | None = None):
+    """Per-day counts for a given month: how many arrived, how many got
+    archived, how many are still unread."""
+    now = datetime.now(timezone.utc)
+    year = year or now.year
+    month = month or now.month
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+
+        day = cast(Email.received_at, Date)
+        stmt = (
+            select(
+                day.label("day"),
+                func.count().label("received"),
+                func.sum(case((Email.archived_at.is_not(None), 1), else_=0)).label("archived"),
+                func.sum(case((Email.is_unread.is_(True), 1), else_=0)).label("unread"),
+                func.sum(case((Email.urgency == "high", 1), else_=0)).label("high"),
+            )
+            .where(
+                Email.tenant_id == tenant.id,
+                extract("year", Email.received_at) == year,
+                extract("month", Email.received_at) == month,
+            )
+            .group_by(day)
+            .order_by(day)
+        )
+        rows = (await session.execute(stmt)).all()
+
+        return {
+            "year": year,
+            "month": month,
+            "days": [
+                {
+                    "date": r.day.isoformat(),
+                    "received": r.received,
+                    "archived": r.archived,
+                    "unread": r.unread,
+                    "high": r.high,
+                }
+                for r in rows
+            ],
+        }
+
+
+@app.get("/calendar/day")
+async def calendar_day(date: str):
+    """Full email list for one calendar day (drill-down from /calendar)."""
+    try:
+        parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "date must be YYYY-MM-DD")
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        day_col = cast(Email.received_at, Date)
+        rows = (
+            await session.scalars(
+                select(Email)
+                .where(Email.tenant_id == tenant.id, day_col == parsed_date)
+                .order_by(Email.received_at.desc())
+            )
+        ).all()
+        return {
+            "date": date,
+            "emails": [
+                {
+                    "id": r.id,
+                    "subject": r.subject,
+                    "sender": r.sender,
+                    "urgency": r.urgency,
+                    "is_unread": r.is_unread,
+                    "archived_at": r.archived_at.isoformat() if r.archived_at else None,
+                    "received_at": r.received_at.isoformat(),
+                }
+                for r in rows
+            ],
+        }

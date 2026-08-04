@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { api, gmailLink, type Digest } from '../api'
+import { api, type Digest } from '../api'
 import { StatCard } from './StatCard'
 import { UrgencyBadge } from './Badge'
 import { QuickRuleButton } from './QuickRuleButton'
+import { EmailExpando } from './EmailExpando'
 
 export function DigestView() {
   const [digest, setDigest] = useState<Digest | null>(null)
@@ -82,20 +83,14 @@ export function DigestView() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <UrgencyBadge urgency={e.urgency} />
-                    <a
-                      href={gmailLink(e.provider_message_id)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="truncate font-medium hover:text-rust hover:underline"
-                    >
-                      {e.subject}
-                    </a>
+                    <span className="truncate font-medium">{e.subject}</span>
                   </div>
                   <div className="mt-1 text-sm text-ink-soft">{e.sender}</div>
                   {e.reasoning && (
                     <div className="mt-2 text-sm italic text-ink-soft">"{e.reasoning}"</div>
                   )}
-                  <div className="mt-2">
+                  <div className="mt-2 flex items-center gap-3">
+                    <EmailExpando emailId={e.id} />
                     <QuickRuleButton sender={e.sender} />
                   </div>
                 </div>

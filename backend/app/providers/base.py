@@ -17,6 +17,7 @@ class NormalizedEmail:
     received_at: datetime
     snippet: str
     body_text: str
+    message_id_header: str = ""  # RFC822 Message-ID — used for reliable deep-linking
     labels: list[str] = field(default_factory=list)
     is_unread: bool = False
 

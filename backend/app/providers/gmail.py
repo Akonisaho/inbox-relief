@@ -1,7 +1,9 @@
 import base64
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httplib2.error
 import truststore
 
 truststore.inject_into_ssl()  # trust the Windows cert store — needed behind corporate TLS-inspecting proxies
@@ -18,6 +20,22 @@ from app.providers.base import MailProvider, NormalizedEmail
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 ARCHIVED_LABEL_NAME = "Archived-By-System"
+
+
+def _execute_with_retry(request, attempts: int = 6, base_delay: float = 3.0):
+    """Long batches over a flaky connection occasionally hit a transient
+    network failure mid-fetch — read timeouts (OSError) and full drops that
+    surface as DNS resolution failures (httplib2's ServerNotFoundError, not
+    an OSError subclass). Retry with backoff rather than aborting the whole
+    sync over one blip; up to ~45s of cumulative backoff to ride out a short
+    Wi-Fi/connection drop."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return request.execute()
+        except (OSError, httplib2.error.HttpLib2Error):
+            if attempt == attempts:
+                raise
+            time.sleep(base_delay * attempt)
 
 
 class GmailProvider(MailProvider):
@@ -61,7 +79,7 @@ class GmailProvider(MailProvider):
                 .messages()
                 .list(userId="me", q=query, maxResults=page_size, pageToken=page_token)
             )
-            results = request.execute()
+            results = _execute_with_retry(request)
             message_refs.extend(results.get("messages", []))
 
             page_token = results.get("nextPageToken")
@@ -70,12 +88,8 @@ class GmailProvider(MailProvider):
 
         emails: list[NormalizedEmail] = []
         for ref in message_refs:
-            msg = (
-                self._service.users()
-                .messages()
-                .get(userId="me", id=ref["id"], format="full")
-                .execute()
-            )
+            request = self._service.users().messages().get(userId="me", id=ref["id"], format="full")
+            msg = _execute_with_retry(request)
             emails.append(self._to_normalized_email(msg))
         return emails
 
@@ -126,6 +140,7 @@ class GmailProvider(MailProvider):
             received_at=received_at,
             snippet=msg.get("snippet", ""),
             body_text=GmailProvider._extract_body_text(msg["payload"]),
+            message_id_header=headers.get("message-id", ""),
             labels=msg.get("labelIds", []),
             is_unread="UNREAD" in msg.get("labelIds", []),
         )

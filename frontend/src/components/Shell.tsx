@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react'
 
-export type View = 'digest' | 'inbox' | 'chat' | 'rules'
+export type View = 'digest' | 'inbox' | 'calendar' | 'chat' | 'rules'
 
 const NAV: { key: View; label: string }[] = [
   { key: 'digest', label: 'Digest' },
   { key: 'inbox', label: 'Inbox' },
+  { key: 'calendar', label: 'Calendar' },
   { key: 'chat', label: 'Chat' },
   { key: 'rules', label: 'Rules' },
 ]

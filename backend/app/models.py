@@ -41,6 +41,7 @@ class Email(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     snippet: Mapped[str]
     body_text: Mapped[str]
+    message_id_header: Mapped[str] = mapped_column(default="")
     labels: Mapped[list] = mapped_column(JSON, default=list)
     is_unread: Mapped[bool] = mapped_column(default=False)
 
