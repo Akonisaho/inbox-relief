@@ -32,6 +32,11 @@ class MailProvider(ABC):
         """Establish credentials (OAuth flow, token refresh, etc.)."""
 
     @abstractmethod
+    def get_own_email_address(self) -> str:
+        """The authenticated mailbox's own address — used to detect whether
+        the user ever replied in a thread (sender == own address)."""
+
+    @abstractmethod
     def fetch_new_emails(self, since: datetime | None = None) -> list[NormalizedEmail]:
         """Return normalized emails received since the given timestamp."""
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, type ClassifiedEmail } from '../api'
-import { UrgencyBadge } from './Badge'
+import { DueDateBadge, UrgencyBadge } from './Badge'
 import { QuickRuleButton } from './QuickRuleButton'
 import { EmailExpando } from './EmailExpando'
 
@@ -103,6 +103,7 @@ export function InboxView() {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <UrgencyBadge urgency={e.urgency} />
+                <DueDateBadge dueDate={e.due_date} />
                 {e.archived_at && (
                   <span className="text-xs text-ink-soft">archived</span>
                 )}

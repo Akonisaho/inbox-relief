@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Rule } from '../api'
 import { UrgencyBadge } from './Badge'
+import { SuggestedRules } from './SuggestedRules'
 
 export function RulesPanel() {
   const [rules, setRules] = useState<Rule[]>([])
@@ -70,6 +71,8 @@ export function RulesPanel() {
         Standing policies that skip classification entirely when matched. Just write what you
         mean — e.g. "emails from Acme Corp or acme@example.com are not important, archive them".
       </p>
+
+      <SuggestedRules onApplied={load} />
 
       <div className="mb-8 rounded-lg border border-border bg-surface p-4">
         <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-ink-soft">

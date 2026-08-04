@@ -1,3 +1,4 @@
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -168,6 +169,15 @@ def _matches_rule(rule: Rule, subject: str, sender: str) -> bool:
     return rule.match_value.lower() in haystack
 
 
+def _parse_due_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None  # model occasionally returns a malformed date — treat as none rather than fail
+
+
 AUTO_ARCHIVE_CONFIDENCE_THRESHOLD = 0.85
 
 
@@ -203,12 +213,14 @@ async def classify_unclassified_emails(limit: int = 20):
                 row.should_archive = matched_rule.should_archive
                 row.confidence = 1.0
                 row.reasoning = f"Matched rule: {matched_rule.match_field}={matched_rule.match_value!r}"
+                row.due_date = None
                 row.classified_at = datetime.now(timezone.utc)
                 rule_matched += 1
             else:
                 try:
                     result = await run_in_threadpool(
-                        classify_email, tenant.id, row.subject, row.sender, row.body_text, row.snippet
+                        classify_email,
+                        tenant.id, row.subject, row.sender, row.body_text, row.snippet, row.received_at,
                     )
                 except ClassificationError as e:
                     failed.append({"id": row.id, "subject": row.subject, "error": str(e)})
@@ -218,6 +230,7 @@ async def classify_unclassified_emails(limit: int = 20):
                 row.should_archive = bool(result["should_archive"])
                 row.confidence = float(result["confidence"])
                 row.reasoning = result["reasoning"]
+                row.due_date = _parse_due_date(result.get("due_date"))
                 row.classified_at = datetime.now(timezone.utc)
                 classified += 1
 
@@ -263,6 +276,7 @@ async def list_classified_emails():
                 "should_archive": row.should_archive,
                 "confidence": row.confidence,
                 "reasoning": row.reasoning,
+                "due_date": row.due_date.isoformat() if row.due_date else None,
                 "archived_at": row.archived_at.isoformat() if row.archived_at else None,
             }
             for row in rows
@@ -288,6 +302,7 @@ async def get_email(email_id: int):
             "urgency": row.urgency,
             "should_archive": row.should_archive,
             "reasoning": row.reasoning,
+            "due_date": row.due_date.isoformat() if row.due_date else None,
             "archived_at": row.archived_at.isoformat() if row.archived_at else None,
         }
 
@@ -492,6 +507,7 @@ async def daily_digest():
                     "snippet": r.snippet,
                     "urgency": r.urgency,
                     "reasoning": r.reasoning,
+                    "due_date": r.due_date.isoformat() if r.due_date else None,
                     "received_at": r.received_at.isoformat(),
                 }
                 for r in needs_attention
@@ -738,3 +754,67 @@ async def calendar_day(date: str):
                 for r in rows
             ],
         }
+
+
+@app.get("/senders/never-replied")
+async def never_replied_senders(min_count: int = 2):
+    """Senders where you've never sent a message in any of their threads —
+    a strong signal of promotional/notification mail worth bulk-archiving,
+    learned from your actual reply history rather than guessed."""
+    provider = await run_in_threadpool(_gmail_provider)
+    own_email = await run_in_threadpool(provider.get_own_email_address)
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+
+        replied_threads = select(Email.thread_id).where(
+            Email.tenant_id == tenant.id, Email.sender.ilike(f"%{own_email}%")
+        )
+        stmt = (
+            select(Email.sender, func.count().label("count"))
+            .where(
+                Email.tenant_id == tenant.id,
+                ~Email.sender.ilike(f"%{own_email}%"),
+                ~Email.thread_id.in_(replied_threads),
+            )
+            .group_by(Email.sender)
+            .having(func.count() >= min_count)
+            .order_by(func.count().desc())
+        )
+        rows = (await session.execute(stmt)).all()
+
+        return {
+            "own_email": own_email,
+            "senders": [{"sender": r.sender, "count": r.count} for r in rows],
+        }
+
+
+class ApplyNeverRepliedRequest(BaseModel):
+    senders: list[str]
+
+
+@app.post("/senders/never-replied/apply")
+async def apply_never_replied_rules(body: ApplyNeverRepliedRequest):
+    """Bulk-create archive rules for chosen never-replied senders — a
+    reviewable action, not silent automation: the caller picks which
+    senders from the suggestion list to actually apply."""
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        created = []
+        for sender in body.senders:
+            match = re.search(r"<([^>]+)>", sender)
+            address = match.group(1) if match else sender
+            rule = Rule(
+                tenant_id=tenant.id,
+                match_field="sender",
+                match_value=address,
+                should_archive=True,
+                urgency="low",
+                source_text=f"Suggested: you've never replied to {address}",
+            )
+            session.add(rule)
+            created.append(address)
+        _log_audit(session, tenant.id, "rule_created", detail={"bulk_never_replied": created})
+        await session.commit()
+
+    return {"created": len(created)}

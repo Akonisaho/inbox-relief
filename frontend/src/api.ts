@@ -8,6 +8,7 @@ export interface ClassifiedEmail {
   should_archive: boolean | null
   confidence: number | null
   reasoning: string | null
+  due_date: string | null
   archived_at: string | null
 }
 
@@ -20,6 +21,7 @@ export interface DigestEmail {
   snippet: string
   urgency: string
   reasoning: string | null
+  due_date: string | null
   received_at: string
 }
 
@@ -53,6 +55,7 @@ export interface EmailDetail {
   urgency: string | null
   should_archive: boolean | null
   reasoning: string | null
+  due_date: string | null
   archived_at: string | null
 }
 
@@ -83,6 +86,16 @@ export interface CalendarDayEmail {
 export interface CalendarDayDetail {
   date: string
   emails: CalendarDayEmail[]
+}
+
+export interface NeverRepliedSender {
+  sender: string
+  count: number
+}
+
+export interface NeverRepliedResponse {
+  own_email: string
+  senders: NeverRepliedSender[]
 }
 
 export interface Rule {
@@ -154,4 +167,11 @@ export const api = {
   createRuleFromText: (text: string) =>
     request<Rule>('/rules/from_text', { method: 'POST', body: JSON.stringify({ text }) }),
   deleteRule: (id: number) => request<{ deleted: boolean }>(`/rules/${id}`, { method: 'DELETE' }),
+  neverRepliedSenders: (minCount = 2) =>
+    request<NeverRepliedResponse>(`/senders/never-replied?min_count=${minCount}`),
+  applyNeverReplied: (senders: string[]) =>
+    request<{ created: number }>('/senders/never-replied/apply', {
+      method: 'POST',
+      body: JSON.stringify({ senders }),
+    }),
 }

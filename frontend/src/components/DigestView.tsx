@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Digest } from '../api'
 import { StatCard } from './StatCard'
-import { UrgencyBadge } from './Badge'
+import { DueDateBadge, UrgencyBadge } from './Badge'
 import { QuickRuleButton } from './QuickRuleButton'
 import { EmailExpando } from './EmailExpando'
 
@@ -83,6 +83,7 @@ export function DigestView() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <UrgencyBadge urgency={e.urgency} />
+                    <DueDateBadge dueDate={e.due_date} />
                     <span className="truncate font-medium">{e.subject}</span>
                   </div>
                   <div className="mt-1 text-sm text-ink-soft">{e.sender}</div>

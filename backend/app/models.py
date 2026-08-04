@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import JSON, DateTime, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -53,6 +53,7 @@ class Email(Base):
     should_archive: Mapped[bool | None] = mapped_column(default=None)
     confidence: Mapped[float | None] = mapped_column(default=None)
     reasoning: Mapped[str | None] = mapped_column(default=None)
+    due_date: Mapped[date | None] = mapped_column(default=None)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 

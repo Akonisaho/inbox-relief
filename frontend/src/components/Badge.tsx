@@ -20,3 +20,18 @@ export function UrgencyBadge({ urgency }: { urgency: string | null }) {
     </span>
   )
 }
+
+export function DueDateBadge({ dueDate }: { dueDate: string | null }) {
+  if (!dueDate) return null
+
+  const isPast = new Date(dueDate) < new Date(new Date().toDateString())
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${
+        isPast ? 'border-rust/30 bg-rust-soft text-rust' : 'border-amber/30 bg-amber-soft text-amber'
+      }`}
+    >
+      Due {dueDate}
+    </span>
+  )
+}

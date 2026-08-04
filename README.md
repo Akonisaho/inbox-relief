@@ -110,6 +110,17 @@ uvicorn app.main:app --reload
   `POST /rules/from_text` — create one from plain language (e.g. "emails from Acme are not
   important, archive them") using the same LLM extraction chat uses, stores the original text
   as `source_text` for display; `DELETE /rules/{id}` — remove one (now audit-logged)
+- `GET /senders/never-replied?min_count=2` — senders where you've never sent a message in any
+  of their threads (learned from actual reply history, not guessed): a strong signal for
+  bulk-archivable promotional/notification mail. `POST /senders/never-replied/apply` —
+  bulk-create archive rules for chosen senders (reviewable, not automatic — the caller picks
+  which suggestions to apply)
+
+Classification also attempts to extract an explicit deadline/due date (assessment due dates,
+submission deadlines, etc.) into `due_date`, resolving relative phrases ("due Friday") against
+the email's received date. Caveat: small local LLMs are weak at relative-date arithmetic — in
+testing it correctly detected a deadline but resolved "this Friday" two days off. Treat it as a
+helpful hint to verify, not a guaranteed-accurate calendar.
 
 Note: resetting `classified_at` to force reclassification does NOT clear the old
 `should_archive`/`confidence`/`urgency`/`reasoning` values — clear those explicitly too, or the
@@ -181,6 +192,7 @@ frontend/
       ChatPanel.tsx             # chat UI
       RulesPanel.tsx             # write a rule in plain language, or use the manual form
       QuickRuleButton.tsx         # one-click "always archive this sender"
-      EmailExpando.tsx             # in-app "Read email" + "Reply in Gmail" expander
-      Badge.tsx, StatCard.tsx       # small shared UI pieces
+      SuggestedRules.tsx           # review + bulk-apply rules for never-replied senders
+      EmailExpando.tsx              # in-app "Read email" + "Reply in Gmail" expander
+      Badge.tsx, StatCard.tsx        # small shared UI pieces
 ```

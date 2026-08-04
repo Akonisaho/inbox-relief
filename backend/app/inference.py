@@ -18,6 +18,12 @@ alerts, automated notifications, newsletters) that's safe to archive; false \
 if it's a real message the user should keep visible
 - confidence: a number 0.0-1.0 for how sure you are
 - reasoning: one short sentence explaining the judgment
+- due_date: if the email mentions an explicit deadline, due date, submission \
+date, or event date that the user needs to act by (e.g. "assessment due \
+Friday", "submit by 15 August", "meeting on Monday at 2pm") — resolve it to \
+an absolute date in "YYYY-MM-DD" format using the email's received date \
+(given below) to interpret relative phrases like "Friday" or "in 3 days". \
+If no such date is mentioned, use null.
 
 Critical rule: a personal, back-and-forth conversation with a real person \
 (family, friends, partner, colleagues) is NEVER should_archive=true, \
@@ -29,7 +35,7 @@ receipts). When in doubt about whether a sender is a real person or an \
 automated/organizational sender, prefer should_archive=false.
 
 Respond with ONLY a JSON object, no other text:
-{"urgency": "...", "should_archive": true_or_false, "confidence": 0.0, "reasoning": "..."}
+{"urgency": "...", "should_archive": true_or_false, "confidence": 0.0, "reasoning": "...", "due_date": "YYYY-MM-DD" or null}
 """
 
 
@@ -37,7 +43,9 @@ class ClassificationError(Exception):
     pass
 
 
-def classify_email(tenant_id: int, subject: str, sender: str, body_text: str, snippet: str) -> dict:
+def classify_email(
+    tenant_id: int, subject: str, sender: str, body_text: str, snippet: str, received_at
+) -> dict:
     text = email_to_embedding_text(subject, sender, body_text or snippet)
     vector = embed_text(text)
     similar = search_similar(tenant_id, vector, limit=5)
@@ -46,6 +54,7 @@ def classify_email(tenant_id: int, subject: str, sender: str, body_text: str, sn
     prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         f"Similar past emails in this mailbox:\n{similar_context}\n\n"
+        f"Email received on: {received_at.date().isoformat()}\n"
         f"Email to judge:\nFrom: {sender}\nSubject: {subject}\n\n{(body_text or snippet)[:2000]}"
     )
 
@@ -59,4 +68,5 @@ def classify_email(tenant_id: int, subject: str, sender: str, body_text: str, sn
     if missing:
         raise ClassificationError(f"model response missing fields {missing}: {result!r}")
 
+    result.setdefault("due_date", None)
     return result

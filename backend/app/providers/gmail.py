@@ -111,6 +111,10 @@ class GmailProvider(MailProvider):
             body={"removeLabelIds": [label_id], "addLabelIds": ["INBOX"]},
         ).execute()
 
+    def get_own_email_address(self) -> str:
+        profile = _execute_with_retry(self._service.users().getProfile(userId="me"))
+        return profile["emailAddress"]
+
     def _get_or_create_label_id(self, name: str) -> str:
         labels = self._service.users().labels().list(userId="me").execute().get("labels", [])
         for label in labels:
