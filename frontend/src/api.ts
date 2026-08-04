@@ -30,8 +30,10 @@ export interface Digest {
   archived_total: number
   inbox_count: number
   unclassified_total: number
+  received_today: number
   declutter_kb_approx: number
-  needs_attention: DigestEmail[]
+  needs_immediate_attention: DigestEmail[]
+  important_today: DigestEmail[]
 }
 
 export interface EmailSummary {

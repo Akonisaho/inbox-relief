@@ -481,36 +481,47 @@ async def daily_digest():
                 Email.tenant_id == tenant.id, Email.classified_at.is_(None)
             )
         )
+        received_today = await session.scalar(
+            select(func.count()).select_from(Email).where(
+                Email.tenant_id == tenant.id, cast(Email.received_at, Date) == today
+            )
+        )
         declutter_bytes = await session.scalar(
             select(func.coalesce(func.sum(func.length(Email.body_text)), 0)).where(
                 Email.tenant_id == tenant.id, Email.archived_at.is_not(None)
             )
         )
 
+        def _serialize(r):
+            return {
+                "id": r.id,
+                "provider_message_id": r.provider_message_id,
+                "message_id_header": r.message_id_header,
+                "subject": r.subject,
+                "sender": r.sender,
+                "snippet": r.snippet,
+                "urgency": r.urgency,
+                "reasoning": r.reasoning,
+                "due_date": r.due_date.isoformat() if r.due_date else None,
+                "received_at": r.received_at.isoformat(),
+            }
+
         return {
             "mailbox_total": total,
             "archived_total": archived,
             "inbox_count": total - archived,
             "unclassified_total": unclassified,
+            "received_today": received_today,
             # Archiving removes Gmail's Inbox label — it does NOT delete anything or
             # reduce your actual storage quota (Gmail counts All Mail + Trash the same).
             # This is an approximate measure of how much has been decluttered from view,
             # not storage freed.
             "declutter_kb_approx": round(declutter_bytes / 1024, 1),
-            "needs_attention": [
-                {
-                    "id": r.id,
-                    "provider_message_id": r.provider_message_id,
-                    "message_id_header": r.message_id_header,
-                    "subject": r.subject,
-                    "sender": r.sender,
-                    "snippet": r.snippet,
-                    "urgency": r.urgency,
-                    "reasoning": r.reasoning,
-                    "due_date": r.due_date.isoformat() if r.due_date else None,
-                    "received_at": r.received_at.isoformat(),
-                }
-                for r in needs_attention
+            "needs_immediate_attention": [
+                _serialize(r) for r in needs_attention if r.urgency == "high"
+            ],
+            "important_today": [
+                _serialize(r) for r in needs_attention if r.urgency == "medium"
             ],
         }
 

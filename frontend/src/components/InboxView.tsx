@@ -77,19 +77,16 @@ export function InboxView() {
           ))}
         </div>
         <div className="h-5 w-px bg-border" />
-        <div className="flex gap-2">
-          {(['all', 'high', 'medium', 'low'] as UrgencyFilter[]).map((u) => (
-            <button
-              key={u}
-              onClick={() => setUrgencyFilter(u)}
-              className={`rounded-full px-3 py-1 text-sm font-medium capitalize ${
-                urgencyFilter === u ? 'bg-ink text-paper' : 'bg-surface text-ink-soft border border-border'
-              }`}
-            >
-              {u === 'all' ? 'Any urgency' : u}
-            </button>
-          ))}
-        </div>
+        <select
+          value={urgencyFilter}
+          onChange={(e) => setUrgencyFilter(e.target.value as UrgencyFilter)}
+          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm capitalize outline-none focus:border-ink"
+        >
+          <option value="all">Any urgency</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
       </div>
 
       {error && <div className="mb-4 text-rust">{error}</div>}
