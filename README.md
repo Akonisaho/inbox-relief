@@ -115,6 +115,11 @@ uvicorn app.main:app --reload
   bulk-archivable promotional/notification mail. `POST /senders/never-replied/apply` —
   bulk-create archive rules for chosen senders (reviewable, not automatic — the caller picks
   which suggestions to apply)
+- `GET /storage` — real Gmail/Drive/Photos storage quota (used/limit/percent), via Drive's
+  `about.get` since the Gmail API itself has no way to read it. Requires the `drive.readonly`
+  scope (added alongside `gmail.modify`) and Drive API enabled in the Cloud Console project.
+  Purely informational — never changes when we archive, since archiving only removes the
+  Inbox label and Gmail counts Inbox + Archive + Trash identically toward quota
 
 Classification also attempts to extract an explicit deadline/due date (assessment due dates,
 submission deadlines, etc.) into `due_date`, resolving relative phrases ("due Friday") against

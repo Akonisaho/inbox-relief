@@ -25,6 +25,12 @@ export interface DigestEmail {
   received_at: string
 }
 
+export interface StorageQuota {
+  used_bytes: number
+  limit_bytes: number | null
+  percent_used: number | null
+}
+
 export interface Digest {
   mailbox_total: number
   archived_total: number
@@ -171,6 +177,7 @@ export const api = {
   deleteRule: (id: number) => request<{ deleted: boolean }>(`/rules/${id}`, { method: 'DELETE' }),
   neverRepliedSenders: (minCount = 2) =>
     request<NeverRepliedResponse>(`/senders/never-replied?min_count=${minCount}`),
+  storage: () => request<StorageQuota>('/storage'),
   applyNeverReplied: (senders: string[]) =>
     request<{ created: number }>('/senders/never-replied/apply', {
       method: 'POST',

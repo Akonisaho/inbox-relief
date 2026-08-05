@@ -16,8 +16,13 @@ from googleapiclient.discovery import build
 from app.providers.base import MailProvider, NormalizedEmail
 
 # gmail.modify covers both read and label-change access (archive/restore),
-# short of permanent delete or account settings changes.
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+# short of permanent delete or account settings changes. drive.readonly is
+# needed only for the storage-quota display (Gmail/Drive/Photos share one
+# quota, exposed via Drive's `about.get`, not the Gmail API itself).
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
 ARCHIVED_LABEL_NAME = "Archived-By-System"
 
@@ -43,6 +48,8 @@ class GmailProvider(MailProvider):
         self.credentials_path = Path(credentials_path)
         self.token_path = Path(token_path)
         self._service = None
+        self._drive_service = None
+        self._creds = None
 
     def authenticate(self) -> None:
         creds = None
@@ -59,6 +66,7 @@ class GmailProvider(MailProvider):
                 creds = flow.run_local_server(port=0)
             self.token_path.write_text(creds.to_json())
 
+        self._creds = creds
         self._service = build("gmail", "v1", credentials=creds)
 
     def fetch_new_emails(
@@ -114,6 +122,24 @@ class GmailProvider(MailProvider):
     def get_own_email_address(self) -> str:
         profile = _execute_with_retry(self._service.users().getProfile(userId="me"))
         return profile["emailAddress"]
+
+    def get_storage_quota(self) -> dict:
+        """Gmail/Drive/Photos share one storage quota — Gmail's own API has
+        no way to read it, only Drive's `about.get` does. Requires the
+        drive.readonly scope in addition to gmail.modify."""
+        if self._drive_service is None:
+            self._drive_service = build("drive", "v3", credentials=self._creds)
+        about = _execute_with_retry(
+            self._drive_service.about().get(fields="storageQuota")
+        )
+        quota = about["storageQuota"]
+        used = int(quota.get("usage", 0))
+        limit = int(quota["limit"]) if quota.get("limit") else None
+        return {
+            "used_bytes": used,
+            "limit_bytes": limit,
+            "percent_used": round(used / limit * 100, 1) if limit else None,
+        }
 
     def _get_or_create_label_id(self, name: str) -> str:
         labels = self._service.users().labels().list(userId="me").execute().get("labels", [])

@@ -4,6 +4,7 @@ import { StatCard } from './StatCard'
 import { DueDateBadge, UrgencyBadge } from './Badge'
 import { QuickRuleButton } from './QuickRuleButton'
 import { EmailExpando } from './EmailExpando'
+import { StorageBar } from './StorageBar'
 
 function EmailCard({
   e,
@@ -105,6 +106,8 @@ export function DigestView() {
   return (
     <div>
       <h1 className="mb-6 text-2xl font-semibold tracking-tight">Today's Digest</h1>
+
+      <StorageBar />
 
       <div className="mb-2 grid grid-cols-5 gap-4">
         <StatCard label="Received today" value={digest.received_today} />

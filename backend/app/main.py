@@ -829,3 +829,13 @@ async def apply_never_replied_rules(body: ApplyNeverRepliedRequest):
         await session.commit()
 
     return {"created": len(created)}
+
+
+@app.get("/storage")
+async def storage_quota():
+    """Real Gmail/Drive/Photos storage quota — never changes when we archive
+    (archiving only removes the Inbox label; Gmail counts Inbox + Archive +
+    Trash identically toward quota). Purely informational."""
+    provider = await run_in_threadpool(_gmail_provider)
+    quota = await run_in_threadpool(provider.get_storage_quota)
+    return quota
