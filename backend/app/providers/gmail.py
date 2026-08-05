@@ -50,6 +50,7 @@ class GmailProvider(MailProvider):
         self._service = None
         self._drive_service = None
         self._creds = None
+        self._archived_label_id = None
 
     def authenticate(self) -> None:
         creds = None
@@ -104,20 +105,22 @@ class GmailProvider(MailProvider):
     def archive(self, provider_message_id: str) -> None:
         """Requires gmail.modify scope — see SCOPES note above."""
         label_id = self._get_or_create_label_id(ARCHIVED_LABEL_NAME)
-        self._service.users().messages().modify(
+        request = self._service.users().messages().modify(
             userId="me",
             id=provider_message_id,
             body={"removeLabelIds": ["INBOX"], "addLabelIds": [label_id]},
-        ).execute()
+        )
+        _execute_with_retry(request)
 
     def restore(self, provider_message_id: str) -> None:
         """Requires gmail.modify scope — see SCOPES note above."""
         label_id = self._get_or_create_label_id(ARCHIVED_LABEL_NAME)
-        self._service.users().messages().modify(
+        request = self._service.users().messages().modify(
             userId="me",
             id=provider_message_id,
             body={"removeLabelIds": [label_id], "addLabelIds": ["INBOX"]},
-        ).execute()
+        )
+        _execute_with_retry(request)
 
     def get_own_email_address(self) -> str:
         profile = _execute_with_retry(self._service.users().getProfile(userId="me"))
@@ -142,17 +145,27 @@ class GmailProvider(MailProvider):
         }
 
     def _get_or_create_label_id(self, name: str) -> str:
-        labels = self._service.users().labels().list(userId="me").execute().get("labels", [])
+        # Cached after first resolution — this used to hit the Gmail API fresh
+        # on every single archive()/restore() call, which is both wasteful and
+        # (since it wasn't retry-wrapped) a single point of failure for any
+        # large batch: one transient network blip here used to abort the
+        # entire caller, no matter how much progress it had already made.
+        if self._archived_label_id is not None:
+            return self._archived_label_id
+
+        list_request = self._service.users().labels().list(userId="me")
+        labels = _execute_with_retry(list_request).get("labels", [])
         for label in labels:
             if label["name"] == name:
-                return label["id"]
-        created = (
-            self._service.users()
-            .labels()
-            .create(userId="me", body={"name": name})
-            .execute()
+                self._archived_label_id = label["id"]
+                return self._archived_label_id
+
+        create_request = (
+            self._service.users().labels().create(userId="me", body={"name": name})
         )
-        return created["id"]
+        created = _execute_with_retry(create_request)
+        self._archived_label_id = created["id"]
+        return self._archived_label_id
 
     @staticmethod
     def _to_normalized_email(msg: dict) -> NormalizedEmail:

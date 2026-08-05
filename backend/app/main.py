@@ -1,8 +1,10 @@
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import Date, case, cast, extract, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -45,15 +47,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Inbox Relief — Ingestion (dev)", lifespan=lifespan)
+app = FastAPI(title="Inbox Relief", lifespan=lifespan)
+router = APIRouter()
 
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.get("/ingest/gmail/sync")
+@router.get("/ingest/gmail/sync")
 async def sync_gmail(limit: int | None = 200):
     """limit=None fetches the entire mailbox — slow on a near-full inbox, so
     default to a bounded batch until we're ready for a full historical sync."""
@@ -102,7 +105,7 @@ async def sync_gmail(limit: int | None = 200):
     return {"fetched": len(emails), "newly_stored_or_updated": stored}
 
 
-@app.get("/emails")
+@router.get("/emails")
 async def list_emails():
     async with SessionLocal() as session:
         rows = (await session.scalars(select(Email).order_by(Email.received_at.desc()))).all()
@@ -120,7 +123,7 @@ async def list_emails():
         ]
 
 
-@app.get("/index/gmail")
+@router.get("/index/gmail")
 async def index_unembedded_emails():
     """Embed every stored email that hasn't been embedded yet and upsert into Qdrant."""
     async with SessionLocal() as session:
@@ -153,7 +156,7 @@ async def index_unembedded_emails():
     return {"indexed": indexed, "skipped_already_embedded": len(rows) - indexed}
 
 
-@app.get("/search")
+@router.get("/search")
 async def search_emails(q: str, limit: int = 5):
     """Find past emails semantically similar to a free-text query — proves the RAG retrieval step."""
     async with SessionLocal() as session:
@@ -181,7 +184,7 @@ def _parse_due_date(value):
 AUTO_ARCHIVE_CONFIDENCE_THRESHOLD = 0.85
 
 
-@app.get("/classify/gmail")
+@router.get("/classify/gmail")
 async def classify_unclassified_emails(limit: int = 20):
     """Judge urgency + archive-worthiness for unclassified emails via local LLM + RAG.
     Bounded by default — CPU inference is much slower than embedding. Rules are
@@ -203,7 +206,7 @@ async def classify_unclassified_emails(limit: int = 20):
         ).all()
         rules = (await session.scalars(select(Rule).where(Rule.tenant_id == tenant.id))).all()
 
-        classified, rule_matched, auto_archived, failed = 0, 0, 0, []
+        classified, rule_matched, auto_archived, since_commit, failed = 0, 0, 0, 0, []
         for row in rows:
             matched_rule = next(
                 (r for r in rules if _matches_rule(r, row.subject, row.sender)), None
@@ -234,16 +237,32 @@ async def classify_unclassified_emails(limit: int = 20):
                 row.classified_at = datetime.now(timezone.utc)
                 classified += 1
 
+            since_commit += 1
+
             if row.should_archive and row.confidence >= AUTO_ARCHIVE_CONFIDENCE_THRESHOLD:
-                if provider is None:
-                    provider = await run_in_threadpool(_gmail_provider)
-                await run_in_threadpool(provider.archive, row.provider_message_id)
-                row.archived_at = datetime.now(timezone.utc)
-                _log_audit(
-                    session, row.tenant_id, "archive", row.id,
-                    {"subject": row.subject, "auto": True, "via": "classify", "confidence": row.confidence},
-                )
-                auto_archived += 1
+                try:
+                    if provider is None:
+                        provider = await run_in_threadpool(_gmail_provider)
+                    await run_in_threadpool(provider.archive, row.provider_message_id)
+                except Exception as e:
+                    # The classification itself (expensive LLM call) already
+                    # succeeded and stands regardless — don't lose it or abort
+                    # the rest of the batch just because the archive call failed.
+                    failed.append({"id": row.id, "subject": row.subject, "error": f"archive failed: {e}"})
+                else:
+                    row.archived_at = datetime.now(timezone.utc)
+                    _log_audit(
+                        session, row.tenant_id, "archive", row.id,
+                        {"subject": row.subject, "auto": True, "via": "classify", "confidence": row.confidence},
+                    )
+                    auto_archived += 1
+
+            # Incremental commits: classification is the expensive part (10-25s/email
+            # through the LLM) — commit every 10 rows so a later failure only
+            # costs a small amount of already-done work, not the whole batch.
+            if since_commit >= 10:
+                await session.commit()
+                since_commit = 0
 
         await session.commit()
 
@@ -255,7 +274,7 @@ async def classify_unclassified_emails(limit: int = 20):
     }
 
 
-@app.get("/emails/classified")
+@router.get("/emails/classified")
 async def list_classified_emails():
     async with SessionLocal() as session:
         rows = (
@@ -283,7 +302,7 @@ async def list_classified_emails():
         ]
 
 
-@app.get("/emails/{email_id}")
+@router.get("/emails/{email_id}")
 async def get_email(email_id: int):
     """Full content for in-app reading, fetched on demand rather than bundled
     into list responses (body text would bloat those for no benefit)."""
@@ -307,7 +326,7 @@ async def get_email(email_id: int):
         }
 
 
-@app.post("/emails/{email_id}/archive")
+@router.post("/emails/{email_id}/archive")
 async def archive_one(email_id: int):
     async with SessionLocal() as session:
         row = await session.get(Email, email_id)
@@ -326,7 +345,7 @@ async def archive_one(email_id: int):
     return {"archived": True, "email_id": email_id}
 
 
-@app.post("/emails/{email_id}/restore")
+@router.post("/emails/{email_id}/restore")
 async def restore_one(email_id: int):
     async with SessionLocal() as session:
         row = await session.get(Email, email_id)
@@ -345,7 +364,7 @@ async def restore_one(email_id: int):
     return {"restored": True, "email_id": email_id}
 
 
-@app.get("/archive/candidates")
+@router.get("/archive/candidates")
 async def archive_candidates(threshold: float = 0.7):
     """Preview what /archive/auto would archive, without touching anything."""
     async with SessionLocal() as session:
@@ -368,7 +387,7 @@ async def archive_candidates(threshold: float = 0.7):
         }
 
 
-@app.post("/archive/auto")
+@router.post("/archive/auto")
 async def archive_auto(threshold: float = 0.7):
     """Actually execute the bulk archive for every high-confidence should_archive email."""
     async with SessionLocal() as session:
@@ -402,7 +421,7 @@ class CorrectionRequest(BaseModel):
     note: str | None = None
 
 
-@app.post("/emails/{email_id}/correct")
+@router.post("/emails/{email_id}/correct")
 async def correct_one(email_id: int, body: CorrectionRequest):
     if body.field not in ("should_archive", "urgency"):
         raise HTTPException(400, "field must be 'should_archive' or 'urgency'")
@@ -446,7 +465,7 @@ async def correct_one(email_id: int, body: CorrectionRequest):
     return {"corrected": True, "email_id": email_id, "field": body.field}
 
 
-@app.get("/digest")
+@router.get("/digest")
 async def daily_digest():
     """Emails needing attention TODAY: unarchived, not low-urgency, received today."""
     today = datetime.now(timezone.utc).date()
@@ -531,7 +550,7 @@ class ChatRequest(BaseModel):
     email_id: int | None = None
 
 
-@app.post("/chat")
+@router.post("/chat")
 async def chat(body: ChatRequest):
     async with SessionLocal() as session:
         tenant = await _get_default_tenant(session)
@@ -583,7 +602,7 @@ async def chat(body: ChatRequest):
         return {"intent": "question", "answer": result.get("answer")}
 
 
-@app.get("/rules")
+@router.get("/rules")
 async def list_rules():
     async with SessionLocal() as session:
         rows = (await session.scalars(select(Rule))).all()
@@ -607,7 +626,7 @@ class RuleRequest(BaseModel):
     urgency: str = "low"
 
 
-@app.post("/rules")
+@router.post("/rules")
 async def create_rule(body: RuleRequest):
     if body.match_field not in ("sender", "subject"):
         raise HTTPException(400, "match_field must be 'sender' or 'subject'")
@@ -642,7 +661,7 @@ class RuleFromTextRequest(BaseModel):
     text: str
 
 
-@app.post("/rules/from_text")
+@router.post("/rules/from_text")
 async def create_rule_from_text(body: RuleFromTextRequest):
     """Write a rule in plain language instead of filling in a form — same
     extraction the chat 'rule' intent uses."""
@@ -673,7 +692,7 @@ async def create_rule_from_text(body: RuleFromTextRequest):
     }
 
 
-@app.delete("/rules/{rule_id}")
+@router.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: int):
     async with SessionLocal() as session:
         rule = await session.get(Rule, rule_id)
@@ -686,7 +705,7 @@ async def delete_rule(rule_id: int):
     return {"deleted": True}
 
 
-@app.get("/calendar")
+@router.get("/calendar")
 async def calendar(year: int | None = None, month: int | None = None):
     """Per-day counts for a given month: how many arrived, how many got
     archived, how many are still unread."""
@@ -732,7 +751,7 @@ async def calendar(year: int | None = None, month: int | None = None):
         }
 
 
-@app.get("/calendar/day")
+@router.get("/calendar/day")
 async def calendar_day(date: str):
     """Full email list for one calendar day (drill-down from /calendar)."""
     try:
@@ -767,7 +786,7 @@ async def calendar_day(date: str):
         }
 
 
-@app.get("/senders/never-replied")
+@router.get("/senders/never-replied")
 async def never_replied_senders(min_count: int = 2):
     """Senders where you've never sent a message in any of their threads —
     a strong signal of promotional/notification mail worth bulk-archiving,
@@ -804,7 +823,7 @@ class ApplyNeverRepliedRequest(BaseModel):
     senders: list[str]
 
 
-@app.post("/senders/never-replied/apply")
+@router.post("/senders/never-replied/apply")
 async def apply_never_replied_rules(body: ApplyNeverRepliedRequest):
     """Bulk-create archive rules for chosen never-replied senders — a
     reviewable action, not silent automation: the caller picks which
@@ -831,7 +850,7 @@ async def apply_never_replied_rules(body: ApplyNeverRepliedRequest):
     return {"created": len(created)}
 
 
-@app.get("/storage")
+@router.get("/storage")
 async def storage_quota():
     """Real Gmail/Drive/Photos storage quota — never changes when we archive
     (archiving only removes the Inbox label; Gmail counts Inbox + Archive +
@@ -839,3 +858,84 @@ async def storage_quota():
     provider = await run_in_threadpool(_gmail_provider)
     quota = await run_in_threadpool(provider.get_storage_quota)
     return quota
+
+
+@router.post("/rules/apply-now")
+async def apply_rules_now():
+    """Fast rule-only sweep over every unclassified email — no LLM involved,
+    so a rule like 'archive all WhatJobs/Glassdoor mail' clears the entire
+    existing backlog in a couple of minutes instead of waiting for those
+    emails to reach the front of the (much slower) LLM classification queue."""
+    COMMIT_EVERY = 25  # incremental commits: a failure partway through loses at
+    # most one batch's worth of progress, not the entire run (this endpoint
+    # previously ran ~78 minutes and lost everything to one network blip since
+    # it was a single all-or-nothing transaction)
+
+    async with SessionLocal() as session:
+        tenant = await _get_default_tenant(session)
+        rules = (await session.scalars(select(Rule).where(Rule.tenant_id == tenant.id))).all()
+        if not rules:
+            return {"matched": 0, "archived": 0, "failed": []}
+
+        rows = (
+            await session.scalars(
+                select(Email).where(
+                    Email.tenant_id == tenant.id, Email.classified_at.is_(None)
+                )
+            )
+        ).all()
+
+        provider = None
+        matched, archived, since_commit = 0, 0, 0
+        failed = []
+        for row in rows:
+            matched_rule = next(
+                (r for r in rules if _matches_rule(r, row.subject, row.sender)), None
+            )
+            if not matched_rule:
+                continue
+
+            row.urgency = matched_rule.urgency
+            row.should_archive = matched_rule.should_archive
+            row.confidence = 1.0
+            row.reasoning = f"Matched rule: {matched_rule.match_field}={matched_rule.match_value!r}"
+            row.due_date = None
+            row.classified_at = datetime.now(timezone.utc)
+            matched += 1
+            since_commit += 1
+
+            if row.should_archive and not row.archived_at:
+                try:
+                    if provider is None:
+                        provider = await run_in_threadpool(_gmail_provider)
+                    await run_in_threadpool(provider.archive, row.provider_message_id)
+                except Exception as e:
+                    # Classification still stands (recorded above) — just leave
+                    # archived_at unset so /archive/candidates can retry it later,
+                    # rather than losing the whole run over one bad message.
+                    failed.append({"id": row.id, "subject": row.subject, "error": str(e)})
+                else:
+                    row.archived_at = datetime.now(timezone.utc)
+                    _log_audit(
+                        session, row.tenant_id, "archive", row.id,
+                        {"subject": row.subject, "auto": True, "via": "rules_apply_now"},
+                    )
+                    archived += 1
+
+            if since_commit >= COMMIT_EVERY:
+                await session.commit()
+                since_commit = 0
+
+        await session.commit()
+
+    return {"matched": matched, "archived": archived, "failed": failed}
+
+
+app.include_router(router, prefix="/api")
+
+# Serve the built frontend (npm run build) as static files, so the packaged
+# app (system tray) is a single process on one origin — no separate Vite dev
+# server needed outside active frontend development.
+_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")

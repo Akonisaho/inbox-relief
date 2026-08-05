@@ -11,3 +11,5 @@ asyncpg
 truststore
 qdrant-client
 ollama
+pystray
+Pillow

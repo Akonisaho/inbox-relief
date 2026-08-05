@@ -10,6 +10,8 @@ export function RulesPanel() {
 
   const [freeText, setFreeText] = useState('')
   const [showManualForm, setShowManualForm] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [applyResult, setApplyResult] = useState<string | null>(null)
 
   const [matchField, setMatchField] = useState<'sender' | 'subject'>('sender')
   const [matchValue, setMatchValue] = useState('')
@@ -64,13 +66,48 @@ export function RulesPanel() {
     }
   }
 
+  const handleApplyNow = async () => {
+    setApplying(true)
+    setApplyResult(null)
+    setError(null)
+    try {
+      const res = await api.applyRulesNow()
+      setApplyResult(`Matched ${res.matched} existing emails, archived ${res.archived} of them.`)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setApplying(false)
+    }
+  }
+
   return (
     <div>
       <h1 className="mb-2 text-2xl font-semibold tracking-tight">Rules</h1>
-      <p className="mb-6 text-sm text-ink-soft">
+      <p className="mb-4 text-sm text-ink-soft">
         Standing policies that skip classification entirely when matched. Just write what you
         mean — e.g. "emails from Acme Corp or acme@example.com are not important, archive them".
       </p>
+
+      <div className="mb-6 rounded-lg border border-border bg-surface p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-sm font-medium">Apply rules to existing mail</div>
+            <p className="text-xs text-ink-soft">
+              New rules only affect future classification by default — this sweeps every
+              unclassified email against your current rules right now (no LLM, so it's fast)
+              and archives whatever matches.
+            </p>
+          </div>
+          <button
+            onClick={handleApplyNow}
+            disabled={applying}
+            className="shrink-0 rounded-md bg-ink px-4 py-2 text-sm font-medium text-paper hover:bg-ink-soft disabled:opacity-50"
+          >
+            {applying ? 'Applying…' : 'Apply now'}
+          </button>
+        </div>
+        {applyResult && <div className="mt-2 text-sm text-moss">{applyResult}</div>}
+      </div>
 
       <SuggestedRules onApplied={load} />
 

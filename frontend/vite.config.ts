@@ -7,10 +7,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8000',
-        rewrite: (path) => path.replace(/^\/api/, ''),
-      },
+      // No rewrite: backend routes now live at /api/* directly (see main.py's
+      // APIRouter prefix), matching the production build where FastAPI serves
+      // both the API and the static frontend from one origin.
+      '/api': 'http://127.0.0.1:8000',
     },
   },
 })

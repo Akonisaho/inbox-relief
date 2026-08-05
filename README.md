@@ -80,6 +80,11 @@ ollama pull llama3.1:8b
 uvicorn app.main:app --reload
 ```
 
+All routes below live under an `/api` prefix (e.g. `GET /api/digest`) — paths are shown
+without it here for brevity. The backend also serves the built frontend (`frontend/dist`)
+as static files at `/`, so in production this is one process on one origin; in dev, Vite's
+proxy forwards `/api/*` straight through unchanged (see `vite.config.ts`).
+
 - `GET /ingest/gmail/sync?limit=200` — fetch Gmail messages (paginated) and upsert into Postgres.
   `limit` caps how many are fetched; omit/set high for a full historical sync (slow — expect
   roughly 300ms/email just for ingestion on a large mailbox, so size the limit accordingly)
@@ -165,9 +170,29 @@ message ID, which doesn't reliably deep-link since Gmail's web UI is thread-cent
 stays read-only; replying happens in Gmail itself, and Gmail has no officially reliable way to
 deep-link straight into reply/compose mode, so we don't pretend otherwise.
 
+## Running as a system tray app (Windows)
+
+Instead of manually running Docker/uvicorn commands in a terminal every time, `tray_app.py`
+keeps everything running in the background with a tray icon:
+
+```
+cd frontend && npm run build && cd ..
+backend\venv\Scripts\pythonw.exe tray_app.py     # no console window
+```
+
+(`npm run build` only needs rerunning after frontend changes — the backend serves that build
+directly as static files, see `main.py`'s `StaticFiles` mount, so there's no separate frontend
+dev server to run.)
+
+It ensures the Postgres/Qdrant Docker containers are running, starts the FastAPI backend as a
+subprocess, and gives you a tray icon with **Open Dashboard / Sync Now / Classify Now / Quit**.
+Ollama isn't managed here — its own installer already runs it as a persistent background
+service with its own tray presence.
+
 ## Repo layout
 
 ```
+tray_app.py       # Windows system tray launcher (Docker containers + backend + tray icon)
 backend/
   app/
     providers/

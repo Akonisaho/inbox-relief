@@ -178,6 +178,8 @@ export const api = {
   neverRepliedSenders: (minCount = 2) =>
     request<NeverRepliedResponse>(`/senders/never-replied?min_count=${minCount}`),
   storage: () => request<StorageQuota>('/storage'),
+  applyRulesNow: () =>
+    request<{ matched: number; archived: number }>('/rules/apply-now', { method: 'POST' }),
   applyNeverReplied: (senders: string[]) =>
     request<{ created: number }>('/senders/never-replied/apply', {
       method: 'POST',
